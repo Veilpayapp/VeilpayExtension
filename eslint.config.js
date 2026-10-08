@@ -10,7 +10,7 @@ export default [
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ['scripts/**/*.mjs', '*.config.js', '*.config.ts'],
+    files: ['scripts/**/*.mjs', '*.config.js', '*.config.ts', 'mcp/**/*.mjs', 'relay/**/*.mjs'],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'module',

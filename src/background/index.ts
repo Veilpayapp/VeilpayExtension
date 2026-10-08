@@ -1602,7 +1602,7 @@ const CHAIN_DECIMALS: Record<ChainId, number> = {
 };
 
 /** Human-readable summary of a WalletConnect RPC request for the user. */
-function requestHint(method: string | undefined, params: any[] | undefined): string {
+function requestHint(method: string | undefined, params: unknown[] | undefined): string {
   if (method === 'eth_sendTransaction' || method === 'eth_signTransaction') {
     const tx =
       Array.isArray(params) && params[0] && typeof params[0] === 'object'
@@ -1635,7 +1635,7 @@ async function resolveWcRequest(req: {
   topic: string;
   requestId: number;
   chainId: string;
-  request: { method: string; params: any[] };
+  request: { method: string; params: unknown[] };
 }): Promise<void> {
   const client = await getWalletConnectClient();
 

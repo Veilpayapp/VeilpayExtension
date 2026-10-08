@@ -6,7 +6,7 @@ export interface PendingWcRequest {
   chainId: string;
   request: {
     method: string;
-    params: any[];
+    params: unknown[];
   };
   createdAt: number;
 }

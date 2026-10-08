@@ -15,5 +15,5 @@ it('emits a real envelope for submission to Horizon', () => {
     fee: 100,
   }, key);
   writeFileSync('stellar-envelope.b64', result.raw);
-  console.log('WROTE envelope len', result.raw.length);
+  console.info('WROTE envelope len', result.raw.length);
 });

@@ -60,7 +60,7 @@ export async function requestTestnetFaucet(
       try {
         const hash = await solanaAirdrop(address);
         return { ok: true, chain, txHash: hash };
-      } catch (cause) {
+      } catch {
         // If the automatic RPC airdrop is rate-limited or down, fall back to
         // the Solana devnet faucet in a browser tab so the user still gets SOL.
         return {

@@ -26,6 +26,7 @@
     "gate:secrets": "node scripts/check-secret-leaks.mjs",
     "gate:all": "npm run typecheck && npm run lint && npm run test && npm run build:only && npm run gate:bundle && npm run gate:secrets",
     "x402:server": "node scripts/x402-reference-server.mjs",
+    "smoke:agent": "node scripts/smoke-agent-stack.mjs",
     "package": "node scripts/package-extension.mjs",
     "icons": "node scripts/generate-icons.mjs"
   },
