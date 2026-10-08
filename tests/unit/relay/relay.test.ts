@@ -300,6 +300,21 @@ describe('universal connector URL', () => {
     expect(page).toContain('expired');
     expect(page).toContain('copy a fresh code');
   });
+
+  it('never serves form-action, which aborts the OAuth redirect in browsers', async () => {
+    // A form-action CSP on the pairing/consent page makes the browser abort
+    // the redirect to the AI client's callback AFTER the relay consumed the
+    // pairing code — leaving the user with "does not recognize that code" on
+    // every retry. The form posts to a server-generated same-origin action, so
+    // the directive adds nothing; it must simply never appear.
+    const { base } = await bootRelay();
+    const response = await fetch(`${base}/authorize`);
+    const csp = response.headers.get('content-security-policy') ?? '';
+    expect(csp).not.toContain('form-action');
+    // The rest of the page hardening stays intact.
+    expect(csp).toContain("default-src 'none'");
+    expect(response.headers.get('x-frame-options')).toBe('DENY');
+  });
 });
 
 describe('relay pairing-code endpoint', () => {

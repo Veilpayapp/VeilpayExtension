@@ -455,10 +455,17 @@ function html(res, status, markup) {
     'content-length': payload.length,
     'cache-control': 'no-store',
     // The consent page is a payment-adjacent surface: no framing, no inline
-    // scripts, and no third-party requests.
+    // scripts, no third-party subresources. form-action is deliberately NOT
+    // set: this page exists to serve an OAuth flow whose form POST is
+    // redirected to the AI client's own registered callback, and any
+    // form-action restriction makes the browser abort exactly that redirect
+    // (the POST still consumes the pairing code server-side, so the user is
+    // left staring at "does not recognize that code" on every retry). The
+    // form's action is server-generated and same-origin, so omitting the
+    // directive loses nothing.
     'x-frame-options': 'DENY',
     'content-security-policy':
-      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'",
+      "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'",
   });
   res.end(payload);
 }
