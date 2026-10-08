@@ -92,3 +92,6 @@ directory.
 ```bash
 npx vitest run tests/unit/mcp
 ```
+
+For a live end-to-end check of this server, the relay, and the OAuth flow over
+real HTTP, run `npm run smoke:agent` (see `docs/MCP_SETUP.md`).

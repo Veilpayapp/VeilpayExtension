@@ -1,0 +1,30 @@
+# Render blueprint: the Veilpay agent relay on the free plan.
+#
+# One click: https://render.com/deploy?repo=https://github.com/chiragchanchal/VeilpayExtension
+# Or in the Render dashboard: New → Blueprint → point it at this repo.
+#
+# The relay is zero-dependency Node, so there is nothing to install or build —
+# the build command just proves Node is present. The public URL is derived from
+# forwarded headers, which Render sets, so the service name does not have to be
+# fixed here; set VEILPAY_RELAY_PUBLIC_URL only if you front the relay with a
+# custom domain or a proxy that strips those headers.
+#
+# Free-plan trade-off: the service sleeps after ~15 minutes with no traffic, and
+# pairings live in memory, so a wake-up means the user re-connects from the
+# extension (one click). autoDeploy stays off for the same reason — restarting
+# on every extension-only push would drop everyone's pairing for no gain.
+services:
+  - type: web
+    name: veilpay-relay
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: node --version
+    startCommand: node relay/server.mjs
+    healthCheckPath: /health
+    autoDeploy: false
+    envVars:
+      - key: NODE_VERSION
+        value: 20.19.0
+      - key: VEILPAY_RELAY_HOST
+        value: 0.0.0.0

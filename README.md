@@ -135,6 +135,15 @@ npm run lint        # Check code quality
 
 See `docs/SETUP.md` for detailed instructions.
 
+## AI agents (MCP)
+
+Claude and ChatGPT can pay from this wallet over MCP — the extension's caps
+and approval prompts still apply, and it is testnet-only. Local mode runs
+`mcp/veilpay-mcp.mjs` (Claude Code / Claude Desktop); relay mode deploys
+`relay/server.mjs` for one-click web connectors. Full guide with free
+Render deployment: **`docs/MCP_SETUP.md`**. Verify the whole stack with
+`npm run smoke:agent`.
+
 ---
 
 ## Tech Stack

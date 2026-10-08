@@ -1,0 +1,16 @@
+# The relay image needs only mcp/ and relay/ — keep the build context small and
+# keep dependencies, build output, and history out of it.
+.git
+node_modules
+dist
+coverage
+.claude
+.kilo
+.remember
+.review_tmp
+tests
+docs
+src
+public
+scripts
+*.md

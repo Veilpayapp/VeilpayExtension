@@ -4,6 +4,12 @@ Lets an AI client pay from Veilpay with **one click**. The user never runs Node,
 never copies a token: the extension registers here, and the client's OAuth
 discovery does the rest.
 
+[![Deploy to Render](https://render.com/images/deploy-logo.svg)](https://render.com/deploy?repo=https://github.com/chiragchanchal/VeilpayExtension)
+
+Free-tier one-click deploy via the `render.yaml` blueprint in the repo root; a
+`Dockerfile` is included for any other host. Full setup guide, including what
+end users do in ChatGPT/Claude: `docs/MCP_SETUP.md`.
+
 ```
 Veilpay extension ──outbound poll──► relay ◄──Streamable HTTP + OAuth── Claude / ChatGPT
 ```
@@ -22,13 +28,17 @@ Check it: `curl http://127.0.0.1:8788/health`
 
 ## Deploy
 
-Any host that runs Node 20+ and terminates TLS. Set:
+One click on the free Render plan: the button above, or Render → New →
+Blueprint → this repo (`render.yaml` at the repo root is the blueprint).
+
+Any other host that runs Node 20+ and terminates TLS also works (a
+`Dockerfile` is included). Set:
 
 | Variable | Required | Value |
 | --- | --- | --- |
-| `VEILPAY_RELAY_PUBLIC_URL` | **yes** | `https://your-relay.example` |
+| `VEILPAY_RELAY_PUBLIC_URL` | no | `https://your-relay.example` — only if a proxy strips the forwarded headers Render and friends set. |
 | `PORT` | no | Injected by most hosts. |
-| `VEILPAY_RELAY_HOST` | no | `0.0.0.0` to accept external traffic. |
+| `VEILPAY_RELAY_HOST` | no | `0.0.0.0` to accept external traffic (the blueprint and Dockerfile set this). |
 
 `VEILPAY_RELAY_PUBLIC_URL` matters: OAuth metadata must advertise the public
 `https://` origin, and the client rejects the discovery if it doesn't match what
