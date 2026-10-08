@@ -39,6 +39,7 @@ const CLIENTS = {
 type ClientKey = keyof typeof CLIENTS;
 
 const DEFAULT_PORT = 8765;
+const DEFAULT_RELAY_URL = 'https://veilpay-relay.onrender.com';
 
 /**
  * Connects the wallet to an AI client.
@@ -52,10 +53,12 @@ export function AgentBridgeSettings() {
   const [status, setStatus] = useState<AgentStatus | null>(null);
   const [mode, setMode] = useState<'relay' | 'local'>('relay');
   const [client, setClient] = useState<ClientKey>('claude');
-  const [relayUrl, setRelayUrl] = useState('');
+  const [relayUrl, setRelayUrl] = useState(DEFAULT_RELAY_URL);
   const [port, setPort] = useState(String(DEFAULT_PORT));
   const [token, setToken] = useState('');
   const [mcpUrl, setMcpUrl] = useState<string | null>(null);
+  const [pairingCode, setPairingCode] = useState<string | null>(null);
+  const [pairingCodeExpiresAt, setPairingCodeExpiresAt] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -111,6 +114,8 @@ export function AgentBridgeSettings() {
       }
       const result = await send('agent.relay.register', { baseUrl: trimmed });
       setMcpUrl(result.mcpUrl);
+      setPairingCode(result.pairingCode);
+      setPairingCodeExpiresAt(result.pairingCodeExpiresAt);
       // Put the URL on the clipboard immediately: the next step is pasting it
       // into the client, and making the user select it by hand is the friction
       // this path exists to remove.
@@ -151,11 +156,28 @@ export function AgentBridgeSettings() {
     }
   };
 
+  const handleRefreshPairingCode = async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      const result = await send('agent.relay.pairing-code', {});
+      setPairingCode(result.pairingCode);
+      setPairingCodeExpiresAt(result.pairingCodeExpiresAt);
+      await copy(result.pairingCode);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not get a pairing code.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleDisable = async () => {
     setBusy(true);
     try {
       await send('agent.disable', {});
       setMcpUrl(null);
+      setPairingCode(null);
+      setPairingCodeExpiresAt(null);
       await refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not disconnect.');
@@ -199,24 +221,62 @@ export function AgentBridgeSettings() {
   // that rather than the connection form again.
   if (mcpUrl !== null || status?.paired === true) {
     const chosen = CLIENTS[client];
-    const url = mcpUrl ?? '';
+    const url =
+      mcpUrl ??
+      (status?.mode === 'relay' && status.endpoint !== null ? `${status.endpoint}/mcp` : '');
     return (
       <div className="flex flex-col gap-3">
         <Card title="Agent">
           {statusPill}
           <p className="mb-3 font-body text-xs text-content-secondary">
-            Add this to {chosen.label} as a remote MCP server. It opens the right
-            settings page; paste the URL there.
+            Everyone uses this same public MCP URL. Add it to {chosen.label}, then enter the pairing
+            code below when the client opens Veilpay.
           </p>
 
           {url.length > 0 && (
             <div className="mb-3 rounded-xl border border-surface-700/60 bg-surface-900 p-3">
               <p className="font-body text-[10px] uppercase tracking-wide text-content-tertiary">
-                MCP server URL
+                Shared MCP server URL
               </p>
               <p className="mt-0.5 break-all font-mono text-[11px] text-content-primary">{url}</p>
             </div>
           )}
+
+          <div className="mb-3 rounded-xl border border-accent-500/25 bg-accent-500/10 p-3">
+            <div className="flex items-center justify-between">
+              <p className="font-body text-[10px] uppercase tracking-wide text-accent-400">
+                Pairing code
+              </p>
+              {pairingCodeExpiresAt !== null && (
+                <p className="font-body text-[10px] text-content-tertiary">
+                  Expires{' '}
+                  {new Date(pairingCodeExpiresAt).toLocaleTimeString([], {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
+                </p>
+              )}
+            </div>
+            {pairingCode !== null ? (
+              <p className="mt-1 text-center font-mono text-xl font-semibold tracking-[0.22em] text-content-primary">
+                {pairingCode}
+              </p>
+            ) : (
+              <p className="mt-1 font-body text-xs text-content-secondary">
+                Generate a code when you are ready to connect an AI client.
+              </p>
+            )}
+            <Button
+              variant="secondary"
+              fullWidth
+              className="mt-2"
+              onClick={() => void handleRefreshPairingCode()}
+              disabled={busy}
+            >
+              <Glyph name="copy" className="h-4 w-4" />
+              {pairingCode === null ? 'Get pairing code' : 'Copy fresh code'}
+            </Button>
+          </div>
 
           <div className="flex gap-2">
             {url.length > 0 && (
@@ -237,11 +297,17 @@ export function AgentBridgeSettings() {
 
           <p className="mt-3 font-body text-[11px] text-content-tertiary">{chosen.hint}</p>
           <p className="mt-2 font-body text-[11px] text-content-tertiary">
-            The client will show a sign-in page from the relay. Approving it is the
-            last step.
+            The client opens a Veilpay page. Enter the pairing code shown above, then approve. Codes
+            expire after 10 minutes and work once.
           </p>
 
-          <Button variant="ghost" fullWidth className="mt-3" onClick={handleDisable} disabled={busy}>
+          <Button
+            variant="ghost"
+            fullWidth
+            className="mt-3"
+            onClick={handleDisable}
+            disabled={busy}
+          >
             Disconnect
           </Button>
         </Card>
@@ -275,8 +341,7 @@ export function AgentBridgeSettings() {
         {statusPill}
 
         <p className="mb-3 font-body text-xs text-content-secondary">
-          Let an AI assistant pay from this wallet, within caps you set. Pick where
-          you use it.
+          Let an AI assistant pay from this wallet, within caps you set. Pick where you use it.
         </p>
 
         <div className="mb-3 flex gap-2">
@@ -371,23 +436,20 @@ export function AgentBridgeSettings() {
           <li className="flex gap-2">
             <Glyph name="alert" className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
             <span>
-              This grants a spending capability. Keep your caps in{' '}
-              <strong>VAP Grants</strong> small, and disconnect when you are done.
+              This grants a spending capability. Keep your caps in <strong>VAP Grants</strong>{' '}
+              small, and disconnect when you are done.
             </span>
           </li>
           <li className="flex gap-2">
             <Glyph name="shield" className="mt-0.5 h-3.5 w-3.5 shrink-0 text-content-tertiary" />
             <span>
-              A relay can only <em>ask</em> for payments — it can never authorise one.
-              Caps and approvals are enforced here, in the extension.
+              A relay can only <em>ask</em> for payments — it can never authorise one. Caps and
+              approvals are enforced here, in the extension.
             </span>
           </li>
           <li className="flex gap-2">
             <Glyph name="wallet" className="mt-0.5 h-3.5 w-3.5 shrink-0 text-content-tertiary" />
-            <span>
-              Testnet only. Sepolia ETH, devnet SOL, and testnet XLM — no monetary
-              value.
-            </span>
+            <span>Testnet only. Sepolia ETH, devnet SOL, and testnet XLM — no monetary value.</span>
           </li>
         </ul>
       </Card>

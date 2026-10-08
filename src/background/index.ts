@@ -77,11 +77,7 @@ import {
   createGrant,
   type GrantCaps,
 } from '@/core/vap/grant';
-import {
-  loadSpendWindow,
-  recordSpend,
-  requiresApproval,
-} from '@/core/vap/decision';
+import { loadSpendWindow, recordSpend, requiresApproval } from '@/core/vap/decision';
 import { requireGrantConfirmation } from '@/core/vap/confirmation';
 import { appendAudit } from '@/core/vap/audit';
 import {
@@ -214,7 +210,7 @@ const handlers: HandlerMap = {
     const history = await fetchTransactionHistoryCached(
       payload.chain,
       payload.address,
-      payload.limit,
+      payload.limit
     );
     return history;
   },
@@ -240,7 +236,12 @@ const handlers: HandlerMap = {
     const descriptor = normalizeToken(payload.token, payload.asset);
     const token = await resolveToken(payload.chain, descriptor, address);
 
-    const amount = parseTransferAmount(payload.amount, payload.chain, 'tx.estimate', token.decimals);
+    const amount = parseTransferAmount(
+      payload.amount,
+      payload.chain,
+      'tx.estimate',
+      token.decimals
+    );
     if (amount <= 0n) {
       throw new ProtocolError('BAD_REQUEST', 'Amount must be greater than zero.');
     }
@@ -248,11 +249,18 @@ const handlers: HandlerMap = {
     switch (payload.chain) {
       case 'evm': {
         const isErc20 = descriptor.kind === 'erc20';
-        const data = isErc20 && typeof descriptor.address === 'string'
-          ? erc20TransferCalldata(payload.to, amount)
-          : undefined;
+        const data =
+          isErc20 && typeof descriptor.address === 'string'
+            ? erc20TransferCalldata(payload.to, amount)
+            : undefined;
         const source = new RpcFeeSource();
-        const fees = await estimateTransferFee(source, address, isErc20 ? descriptor.address : payload.to, amount, data);
+        const fees = await estimateTransferFee(
+          source,
+          address,
+          isErc20 ? descriptor.address : payload.to,
+          amount,
+          data
+        );
         return {
           chain: 'evm',
           from: address,
@@ -266,7 +274,7 @@ const handlers: HandlerMap = {
       case 'solana': {
         const service = createChainService(
           'solana',
-          await resolveRpcUrl('solana', TESTNET_ENDPOINTS.solana),
+          await resolveRpcUrl('solana', TESTNET_ENDPOINTS.solana)
         );
         const fee = await service.estimateGas({});
         return {
@@ -334,7 +342,12 @@ const handlers: HandlerMap = {
     // of an opaque node rejection.
     const descriptor = normalizeToken(payload.token, payload.asset);
     const token = await resolveToken(payload.chain, descriptor, address);
-    const amount = parseTransferAmount(payload.amount, payload.chain, 'tx.transfer', token.decimals);
+    const amount = parseTransferAmount(
+      payload.amount,
+      payload.chain,
+      'tx.transfer',
+      token.decimals
+    );
     if (amount <= 0n) {
       throw new ProtocolError('BAD_REQUEST', 'Amount must be greater than zero.');
     }
@@ -345,7 +358,7 @@ const handlers: HandlerMap = {
         amount,
         descriptor,
         token.decimals,
-        token.spendable,
+        token.spendable
       );
       return { ...result, decimals: token.decimals };
     } catch (cause) {
@@ -401,10 +414,7 @@ const handlers: HandlerMap = {
    */
   'vault.create': async (payload) => {
     if (!vault.validateMnemonic(payload.mnemonic)) {
-      throw new ProtocolError(
-        'BAD_REQUEST',
-        'That recovery phrase is not a valid BIP-39 phrase.',
-      );
+      throw new ProtocolError('BAD_REQUEST', 'That recovery phrase is not a valid BIP-39 phrase.');
     }
 
     try {
@@ -510,7 +520,7 @@ const handlers: HandlerMap = {
     if (requested !== current) {
       throw new ProtocolError(
         'CHAIN_UNSUPPORTED',
-        `Unrecognized chain ID ${payload.chainId}. Veilpay supports Sepolia (${current}).`,
+        `Unrecognized chain ID ${payload.chainId}. Veilpay supports Sepolia (${current}).`
       );
     }
     return { chainId: current };
@@ -528,9 +538,7 @@ const handlers: HandlerMap = {
       throw new ProtocolError('ORIGIN_DENIED', 'Could not verify the requesting origin.');
     }
     const accounts = await vault.getAllAccountAddresses(0);
-    const evmAccounts = accounts
-      .filter((a) => a.chain === 'evm')
-      .map((a) => a.address);
+    const evmAccounts = accounts.filter((a) => a.chain === 'evm').map((a) => a.address);
 
     // Never auto-grant. A dapp only ever sees addresses the user has explicitly
     // approved; granting here would hand every account to any page that calls
@@ -924,7 +932,7 @@ const handlers: HandlerMap = {
       const decision = requiresApproval(
         grant,
         { type: 'x402.pay', amount, chain: 'evm', recipient: challenge.payTo },
-        BigInt(window.amountSpent),
+        BigInt(window.amountSpent)
       );
       if (decision.action === 'deny') {
         void appendAudit('op.denied', {
@@ -938,7 +946,7 @@ const handlers: HandlerMap = {
         });
         throw new ProtocolError(
           'X402_INVALID_CHALLENGE',
-          `Payment denied by grant policy (${decision.reason}).`,
+          `Payment denied by grant policy (${decision.reason}).`
         );
       }
       if (decision.action === 'auto') {
@@ -965,7 +973,7 @@ const handlers: HandlerMap = {
     if (!allowPrompt(origin)) {
       throw new ProtocolError(
         'PROMPT_RATE_LIMITED',
-        'Too many approval requests from this origin. Try again in a minute.',
+        'Too many approval requests from this origin. Try again in a minute.'
       );
     }
 
@@ -1108,7 +1116,7 @@ const handlers: HandlerMap = {
     if (!allowPrompt(origin)) {
       throw new ProtocolError(
         'PROMPT_RATE_LIMITED',
-        'Too many grant requests from this origin. Try again in a minute.',
+        'Too many grant requests from this origin. Try again in a minute.'
       );
     }
 
@@ -1274,9 +1282,12 @@ const handlers: HandlerMap = {
 
     // The dapp's serialized transaction names the signer; pick a wallet account
     // that is both approved and a required signer of this transaction.
-    let parsed:
-      | { message: Uint8Array; accountKeys: string[]; numRequiredSignatures: number; feePayerIndex: number }
-      | null = null;
+    let parsed: {
+      message: Uint8Array;
+      accountKeys: string[];
+      numRequiredSignatures: number;
+      feePayerIndex: number;
+    } | null = null;
     try {
       parsed = parseSolanaTransaction(payload.transaction);
     } catch {
@@ -1287,7 +1298,10 @@ const handlers: HandlerMap = {
       throw new ProtocolError('BAD_REQUEST', 'Solana transaction has no fee payer.');
     }
     if (!approved.includes(signerAddress)) {
-      throw new ProtocolError('ORIGIN_DENIED', 'Transaction signer is not approved for this origin.');
+      throw new ProtocolError(
+        'ORIGIN_DENIED',
+        'Transaction signer is not approved for this origin.'
+      );
     }
     const accountIndex = await findSolanaAccountIndex(signerAddress);
     if (accountIndex === null) {
@@ -1412,18 +1426,25 @@ const handlers: HandlerMap = {
     const proposal = await getPendingWcProposal();
     if (!proposal) return null;
     // Map WalletConnect's namespace types to the simpler protocol shape.
-    const mapNamespace = (
-      ns: { chains?: string[]; methods: string[]; events: string[] }
-    ): { chains: string[]; methods: string[]; events: string[] } => ({
+    const mapNamespace = (ns: {
+      chains?: string[];
+      methods: string[];
+      events: string[];
+    }): { chains: string[]; methods: string[]; events: string[] } => ({
       chains: ns.chains ?? [],
       methods: ns.methods,
       events: ns.events,
     });
-    const requiredNamespaces: Record<string, { chains: string[]; methods: string[]; events: string[] }> = {};
+    const requiredNamespaces: Record<
+      string,
+      { chains: string[]; methods: string[]; events: string[] }
+    > = {};
     for (const [key, value] of Object.entries(proposal.requiredNamespaces)) {
       requiredNamespaces[key] = mapNamespace(value);
     }
-    let optionalNamespaces: Record<string, { chains: string[]; methods: string[]; events: string[] }> | undefined;
+    let optionalNamespaces:
+      | Record<string, { chains: string[]; methods: string[]; events: string[] }>
+      | undefined;
     if (proposal.optionalNamespaces) {
       optionalNamespaces = {};
       for (const [key, value] of Object.entries(proposal.optionalNamespaces)) {
@@ -1435,7 +1456,10 @@ const handlers: HandlerMap = {
       name: string;
       url: string;
       requiredNamespaces: Record<string, { chains: string[]; methods: string[]; events: string[] }>;
-      optionalNamespaces?: Record<string, { chains: string[]; methods: string[]; events: string[] }>;
+      optionalNamespaces?: Record<
+        string,
+        { chains: string[]; methods: string[]; events: string[] }
+      >;
       expiry: number;
       createdAt: number;
     } = {
@@ -1555,7 +1579,10 @@ const handlers: HandlerMap = {
       throw new ProtocolError('BAD_REQUEST', `Could not reach the relay at ${baseUrl}.`);
     }
     if (!response.ok) {
-      throw new ProtocolError('BAD_REQUEST', `The relay refused registration (HTTP ${response.status}).`);
+      throw new ProtocolError(
+        'BAD_REQUEST',
+        `The relay refused registration (HTTP ${response.status}).`
+      );
     }
 
     const body = (await response.json()) as unknown;
@@ -1580,10 +1607,57 @@ const handlers: HandlerMap = {
 
     // The wallet id rides in the path, so the URL the user pastes carries its own
     // identity and the client's OAuth discovery does the rest — nothing to type.
+    // The URL is universal — the same for every user — so the pairing code is
+    // what binds an AI client's OAuth grant to this wallet when the user enters
+    // it on the relay's consent page.
+    const pairing = record.pairing;
+    if (
+      typeof pairing !== 'object' ||
+      pairing === null ||
+      typeof (pairing as Record<string, unknown>).code !== 'string' ||
+      typeof (pairing as Record<string, unknown>).expiresAt !== 'number'
+    ) {
+      throw new ProtocolError('BAD_REQUEST', 'The relay returned an incomplete pairing code.');
+    }
+
     return {
-      mcpUrl: `${baseUrl}/mcp/${walletId}`,
+      mcpUrl: `${baseUrl}/mcp`,
       walletId,
+      pairingCode: (pairing as Record<string, unknown>).code as string,
+      pairingCodeExpiresAt: (pairing as Record<string, unknown>).expiresAt as number,
     };
+  },
+
+  'agent.relay.pairing-code': async () => {
+    const config = await loadAgentBridgeConfig();
+    if (config?.mode !== 'relay' || config.walletId === undefined) {
+      throw new ProtocolError(
+        'BAD_REQUEST',
+        'Connect the hosted relay before requesting a pairing code.'
+      );
+    }
+    const response = await fetch(`${config.baseUrl}/wallet/pairing-code`, {
+      method: 'POST',
+      headers: {
+        'x-veilpay-wallet': config.walletId,
+        'x-veilpay-secret': config.token,
+      },
+    });
+    if (!response.ok) {
+      throw new ProtocolError(
+        'BAD_REQUEST',
+        `The relay refused a pairing code (HTTP ${response.status}).`
+      );
+    }
+    const body = (await response.json()) as unknown;
+    if (typeof body !== 'object' || body === null) {
+      throw new ProtocolError('BAD_REQUEST', 'The relay returned a malformed pairing code.');
+    }
+    const record = body as Record<string, unknown>;
+    if (typeof record.code !== 'string' || typeof record.expiresAt !== 'number') {
+      throw new ProtocolError('BAD_REQUEST', 'The relay returned an incomplete pairing code.');
+    }
+    return { pairingCode: record.code, pairingCodeExpiresAt: record.expiresAt };
   },
 
   'agent.disable': async () => {
@@ -1652,9 +1726,9 @@ async function resolveWcRequest(req: {
       if (accountIndex === null) {
         throw new ProtocolError('ORIGIN_DENIED', 'Sender is not a wallet account.');
       }
-      const value = typeof tx.value === 'string' && tx.value.length > 0 ? normalizeWei(tx.value) : 0n;
-      const to =
-        typeof tx.to === 'string' && tx.to.length > 0 ? tx.to : undefined;
+      const value =
+        typeof tx.value === 'string' && tx.value.length > 0 ? normalizeWei(tx.value) : 0n;
+      const to = typeof tx.to === 'string' && tx.to.length > 0 ? tx.to : undefined;
       const data =
         typeof tx.data === 'string' && tx.data.length > 0 ? hexToBytesStrict(tx.data) : undefined;
 
@@ -1700,7 +1774,10 @@ async function resolveWcRequest(req: {
         throw new ProtocolError('ORIGIN_DENIED', 'Signing address is not a wallet account.');
       }
       const signature = await vault.withAccount('evm', accountIndex, async (account) => {
-        const { signature: sig } = signPersonalMessage(hexToBytesStrict(message), account.privateKey);
+        const { signature: sig } = signPersonalMessage(
+          hexToBytesStrict(message),
+          account.privateKey
+        );
         return sig;
       });
       await client.respondResult(req.topic, req.requestId, signature);
@@ -1712,7 +1789,7 @@ async function resolveWcRequest(req: {
     default:
       throw new ProtocolError(
         'BAD_REQUEST',
-        `WalletConnect method ${req.request.method} is not supported yet.`,
+        `WalletConnect method ${req.request.method} is not supported yet.`
       );
   }
 }
@@ -1732,7 +1809,7 @@ function parseTransferAmount(
   decimal: string,
   chain: ChainId,
   kind: string,
-  decimalsOverride?: number,
+  decimalsOverride?: number
 ): bigint {
   const decimals = decimalsOverride ?? CHAIN_DECIMALS[chain];
   try {
@@ -1763,7 +1840,7 @@ const NATIVE_SYMBOL: Record<ChainId, string> = {
 /** Reconciles the protocol's `token` (new) and `asset` (legacy Stellar) into a `TokenDescriptor`. */
 function normalizeToken(
   token: TokenInputType | undefined,
-  asset: StellarAssetInput | undefined,
+  asset: StellarAssetInput | undefined
 ): TokenDescriptor {
   // Preferred: the new `token` field.
   if (token !== undefined) {
@@ -1798,12 +1875,9 @@ function normalizeToken(
 async function resolveToken(
   chain: ChainId,
   descriptor: TokenDescriptor,
-  address: string,
+  address: string
 ): Promise<{ decimals: number; spendable: bigint; symbol: string }> {
-  const service = createChainService(
-    chain,
-    await resolveRpcUrl(chain, TESTNET_ENDPOINTS[chain]),
-  );
+  const service = createChainService(chain, await resolveRpcUrl(chain, TESTNET_ENDPOINTS[chain]));
 
   // Native token: precision + balance come straight from the chain.
   if (descriptor.kind === 'native') {
@@ -1822,7 +1896,10 @@ async function resolveToken(
   }
 
   if (descriptor.kind === 'erc20') {
-    if (typeof service.erc20Decimals !== 'function' || typeof service.erc20BalanceOf !== 'function') {
+    if (
+      typeof service.erc20Decimals !== 'function' ||
+      typeof service.erc20BalanceOf !== 'function'
+    ) {
       throw new ProtocolError('BAD_REQUEST', 'EVM token support unavailable.');
     }
     const [decimals, balance] = await Promise.all([
@@ -1905,7 +1982,7 @@ function hexToBytesStrict(hex: string): Uint8Array {
  */
 async function pickApprovedEvmAddress(
   from: string | undefined,
-  approved: string[],
+  approved: string[]
 ): Promise<string> {
   const evmApproved = approved.filter((addr) => addr.startsWith('0x'));
   if (evmApproved.length === 0) {
@@ -1915,7 +1992,10 @@ async function pickApprovedEvmAddress(
     return evmApproved[0]!;
   }
   if (!evmApproved.some((addr) => addr.toLowerCase() === from.toLowerCase())) {
-    throw new ProtocolError('ORIGIN_DENIED', 'The requested sender is not approved for this origin.');
+    throw new ProtocolError(
+      'ORIGIN_DENIED',
+      'The requested sender is not approved for this origin.'
+    );
   }
   return from;
 }
@@ -1969,22 +2049,24 @@ async function buildAndBroadcast(
   amount: bigint,
   descriptor: TokenDescriptor,
   decimals: number,
-  spendable: bigint,
+  spendable: bigint
 ): Promise<{ chain: ChainId; from: string; to: string; amountNative: string; hash: string }> {
   switch (payload.chain) {
     case 'evm': {
       return vault.withAccount('evm', payload.index, async (account) => {
         const service = createChainService(
           'evm',
-          await resolveRpcUrl('evm', TESTNET_ENDPOINTS.evm),
+          await resolveRpcUrl('evm', TESTNET_ENDPOINTS.evm)
         );
         const source = new RpcFeeSource();
 
         const isErc20 = descriptor.kind === 'erc20';
-        const data = isErc20 && descriptor.kind === 'erc20'
-          ? erc20TransferCalldata(payload.to, amount)
-          : undefined;
-        const feeEstimateTarget = isErc20 && descriptor.kind === 'erc20' ? descriptor.address : payload.to;
+        const data =
+          isErc20 && descriptor.kind === 'erc20'
+            ? erc20TransferCalldata(payload.to, amount)
+            : undefined;
+        const feeEstimateTarget =
+          isErc20 && descriptor.kind === 'erc20' ? descriptor.address : payload.to;
 
         const [nonce, fees] = await Promise.all([
           service.getSequence(account.address),
@@ -2000,7 +2082,7 @@ async function buildAndBroadcast(
             'INSUFFICIENT_BALANCE',
             isErc20
               ? 'Insufficient token balance for this amount.'
-              : 'Insufficient balance for the amount plus network fee.',
+              : 'Insufficient balance for the amount plus network fee.'
           );
         }
 
@@ -2051,7 +2133,7 @@ async function buildAndBroadcast(
         const blockhash = await fetchSolanaBlockhash();
         const service = createChainService(
           'solana',
-          await resolveRpcUrl('solana', TESTNET_ENDPOINTS.solana),
+          await resolveRpcUrl('solana', TESTNET_ENDPOINTS.solana)
         );
 
         if (descriptor.kind === 'spl') {
@@ -2097,7 +2179,10 @@ async function buildAndBroadcast(
         const lamportBalance = await service.getBalance(account.address);
         const lamportFee = await service.estimateGas({});
         if (lamportBalance < amount + lamportFee) {
-          throw new ProtocolError('INSUFFICIENT_BALANCE', 'Insufficient SOL balance for the amount plus fee.');
+          throw new ProtocolError(
+            'INSUFFICIENT_BALANCE',
+            'Insufficient SOL balance for the amount plus fee.'
+          );
         }
 
         const unsigned: UnsignedSolanaTransfer = {
@@ -2124,10 +2209,7 @@ async function buildAndBroadcast(
     }
     case 'stellar': {
       return vault.withAccount('stellar', payload.index, async (account) => {
-        const service = createChainService(
-          'stellar',
-          await resolveStellarEndpoints(),
-        );
+        const service = createChainService('stellar', await resolveStellarEndpoints());
 
         // Only native-XLM sends require the sender be funded: an unfunded
         // account cannot hold XLM to pay the base reserve. Sending an issued
@@ -2136,10 +2218,13 @@ async function buildAndBroadcast(
         const fee = Number((await service.getBaseFee?.()) ?? 100n);
         const isStellarIssued = descriptor.kind === 'stellar-issued';
         if (!isStellarIssued) {
-          if (typeof service.isFunded === 'function' && !(await service.isFunded(account.address))) {
+          if (
+            typeof service.isFunded === 'function' &&
+            !(await service.isFunded(account.address))
+          ) {
             throw new ProtocolError(
               'BAD_REQUEST',
-              'This Stellar address has not been funded on testnet yet. Use "Get testnet funds" first.',
+              'This Stellar address has not been funded on testnet yet. Use "Get testnet funds" first.'
             );
           }
           // Pre-submit spendable check so a low balance surfaces as a clear
@@ -2147,7 +2232,10 @@ async function buildAndBroadcast(
           // XLM the spendable balance (stroops) was resolved up front; the relayer
           // still enforces the on-chain minimum at submit for issued assets.
           if (spendable < amount + BigInt(fee)) {
-            throw new ProtocolError('INSUFFICIENT_BALANCE', 'Insufficient XLM balance for the amount plus fee.');
+            throw new ProtocolError(
+              'INSUFFICIENT_BALANCE',
+              'Insufficient XLM balance for the amount plus fee.'
+            );
           }
         }
 
@@ -2261,7 +2349,7 @@ async function restartAgentBridge(): Promise<void> {
   const config = await loadAgentBridgeConfig();
   if (config === null) return;
   agentLoop = startAgentBridgeLoop(config, (request) =>
-    executeAgentTool(request.tool, request.args),
+    executeAgentTool(request.tool, request.args)
   );
 }
 
@@ -2271,10 +2359,7 @@ function asChain(value: unknown): ChainId {
 }
 
 /** Dispatches one bridge tool call. Throws to report a failure to the agent. */
-async function executeAgentTool(
-  tool: string,
-  args: Record<string, unknown>,
-): Promise<unknown> {
+async function executeAgentTool(tool: string, args: Record<string, unknown>): Promise<unknown> {
   switch (tool) {
     case 'status': {
       const state = await vault.getState();
@@ -2292,7 +2377,7 @@ async function executeAgentTool(
           : (await vault.getAccountAddress(chain, 0)).address;
       const service = createChainService(
         chain,
-        await resolveRpcUrl(chain, TESTNET_ENDPOINTS[chain]),
+        await resolveRpcUrl(chain, TESTNET_ENDPOINTS[chain])
       );
       const balance = await service.getBalance(address);
       return {
@@ -2349,10 +2434,7 @@ async function executeAgentSend(args: Record<string, unknown>): Promise<unknown>
     throw new ProtocolError('BAD_REQUEST', 'Amount must be greater than zero.');
   }
 
-  const service = createChainService(
-    chain,
-    await resolveRpcUrl(chain, TESTNET_ENDPOINTS[chain]),
-  );
+  const service = createChainService(chain, await resolveRpcUrl(chain, TESTNET_ENDPOINTS[chain]));
   const spendable = await service.getBalance(account);
 
   const broadcast = () =>
@@ -2361,7 +2443,7 @@ async function executeAgentSend(args: Record<string, unknown>): Promise<unknown>
       amount,
       { kind: 'native' },
       decimals,
-      spendable,
+      spendable
     );
 
   const grant = await getActiveGrantByOrigin(AGENT_CLIENT_ID);
@@ -2370,7 +2452,7 @@ async function executeAgentSend(args: Record<string, unknown>): Promise<unknown>
     const decision = requiresApproval(
       grant,
       { type: 'native.transfer', amount, chain, recipient: to },
-      BigInt(window.amountSpent),
+      BigInt(window.amountSpent)
     );
 
     if (decision.action === 'deny') {
@@ -2382,10 +2464,7 @@ async function executeAgentSend(args: Record<string, unknown>): Promise<unknown>
         grantId: grant.id,
         reason: decision.reason,
       });
-      throw new ProtocolError(
-        'BAD_REQUEST',
-        `Denied by the spending grant (${decision.reason}).`,
-      );
+      throw new ProtocolError('BAD_REQUEST', `Denied by the spending grant (${decision.reason}).`);
     }
 
     if (decision.action === 'auto') {
@@ -2408,7 +2487,7 @@ async function executeAgentSend(args: Record<string, unknown>): Promise<unknown>
   if (!allowPrompt(AGENT_CLIENT_ID)) {
     throw new ProtocolError(
       'PROMPT_RATE_LIMITED',
-      'Too many approval requests. Wait a minute and try again.',
+      'Too many approval requests. Wait a minute and try again.'
     );
   }
 
@@ -2492,7 +2571,7 @@ function isInternalMessage(value: unknown): value is InternalMessage {
  */
 async function handleInternalMessage(
   message: InternalMessage,
-  sender: chrome.runtime.MessageSender,
+  sender: chrome.runtime.MessageSender
 ): Promise<{ ok: boolean }> {
   if (sender.id !== chrome.runtime.id || sender.tab !== undefined) {
     return { ok: false };
@@ -2654,43 +2733,43 @@ function buildContextMenu(): void {
 // and a bare module-scope call here would crash the service worker at
 // evaluation (the boot regression we fixed). Degrade to no context menu.
 if (chrome.contextMenus?.onClicked !== undefined) {
-chrome.contextMenus.onClicked.addListener(async (info) => {
-  const selection = info.selectionText ?? '';
-  const match = selection.match(ADDRESS_RE);
-  const address = match?.[0] ?? '';
+  chrome.contextMenus.onClicked.addListener(async (info) => {
+    const selection = info.selectionText ?? '';
+    const match = selection.match(ADDRESS_RE);
+    const address = match?.[0] ?? '';
 
-  switch (info.menuItemId) {
-    case 'veilpay-send': {
-      if (!address) {
-        console.warn('[veilpay] Context menu send: no address found in selection.');
-        return;
+    switch (info.menuItemId) {
+      case 'veilpay-send': {
+        if (!address) {
+          console.warn('[veilpay] Context menu send: no address found in selection.');
+          return;
+        }
+        // Open the popup with the send target pre-filled.
+        // The popup reads the URL fragment to pre-fill the send form.
+        await chrome.tabs.create({
+          url: `chrome-extension://${chrome.runtime.id}/popup.html#send=${address}`,
+        });
+        break;
       }
-      // Open the popup with the send target pre-filled.
-      // The popup reads the URL fragment to pre-fill the send form.
-      await chrome.tabs.create({
-        url: `chrome-extension://${chrome.runtime.id}/popup.html#send=${address}`,
-      });
-      break;
+      case 'veilpay-copy': {
+        // Copy the full selection text to the system clipboard.
+        await navigator.clipboard.writeText(selection).catch(() => {
+          // Fallback for contexts where clipboard API is unavailable.
+          const textarea = document.createElement('textarea');
+          textarea.value = selection;
+          document.body.appendChild(textarea);
+          textarea.select();
+          document.execCommand('copy');
+          document.body.removeChild(textarea);
+        });
+        break;
+      }
+      case 'veilpay-lock': {
+        await vault.lock();
+        break;
+      }
     }
-    case 'veilpay-copy': {
-      // Copy the full selection text to the system clipboard.
-      await navigator.clipboard.writeText(selection).catch(() => {
-        // Fallback for contexts where clipboard API is unavailable.
-        const textarea = document.createElement('textarea');
-        textarea.value = selection;
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand('copy');
-        document.body.removeChild(textarea);
-      });
-      break;
-    }
-    case 'veilpay-lock': {
-      await vault.lock();
-      break;
-    }
-  }
-});
+  });
 }
 
 console.info('[veilpay] service worker ready');

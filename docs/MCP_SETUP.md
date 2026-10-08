@@ -108,9 +108,17 @@ it, it does not replace it.
 
 ## Option B — relay, for ChatGPT and claude.ai connectors
 
-Web clients cannot reach your machine, so a small relay is deployed once and
-the extension dials out to it. Users of your extension then connect with one
-click: they paste nothing but the relay URL.
+Web clients cannot reach your machine, so the team deploys one small relay and
+every wallet dials out to that same service. Users do not need a wallet-specific
+URL or a Node install.
+
+### One public URL for everyone
+
+The universal connector URL is `https://veilpay-relay.onrender.com/mcp`. Every user
+pastes that same URL into ChatGPT or claude.ai. The relay's pairing page then binds
+the AI client's OAuth token to the right wallet using a short code shown in the
+Veilpay extension. The old `/mcp/<walletId>` URL still works for backward
+compatibility, but it is no longer the primary flow.
 
 ### Deploy the relay for free (Render)
 
@@ -134,19 +142,26 @@ Free-plan trade-offs: the service sleeps after ~15 minutes without traffic
 (the first request after that takes ~30–60 s to wake), and pairings live in
 memory, so a restart means users re-connect from the extension — one click. A
 `Dockerfile` is also included if you prefer another host that runs containers;
-any Node 20+ host with TLS works.
+any Node 20+ host with TLS works. Connectors may also be plan-gated by the AI
+client.
 
 ### Connect a wallet (what your users do)
 
-1. **Veilpay → Settings → Agent → Hosted relay** — enter
-   `https://veilpay-relay.onrender.com` and Connect. The extension registers
-   itself and puts its MCP URL on the clipboard.
-2. In ChatGPT: **Settings → Connectors → Add an MCP server**, paste the URL,
-   then Connect. In claude.ai: **Settings → Connectors → Add custom
-   connector**, same paste. (If your plan gates custom connectors, the option
-   will not appear — that is a client-side limitation, not a relay error.)
-3. The client opens the relay's consent page — approve it. That is the whole
-   flow.
+1. **Veilpay → Settings → Agent → Hosted relay** — the field is prefilled with
+   `https://veilpay-relay.onrender.com`. Click **Connect**. The extension
+   registers itself, starts polling, and shows a short pairing code with a copy
+   button.
+2. In ChatGPT, open **Settings → Connectors → Add an MCP server**. In claude.ai,
+   open **Settings → Connectors → Add custom connector**. Paste the same universal
+   URL, `https://veilpay-relay.onrender.com/mcp`, then connect. (If your plan gates
+   custom connectors, the option will not appear — that is a client-side
+   limitation, not a relay error.)
+3. When the AI client opens the relay's pairing page, enter or paste the code from
+   **Veilpay → Settings → Agent**, then approve the consent page. The code is
+   `XXXX-XXXX`, valid for 10 minutes, and single use.
+
+If the relay restarts before the OAuth flow finishes, click **Connect** again to
+register the wallet and get a fresh code.
 
 ### Try it
 
@@ -173,10 +188,11 @@ Fund testnet accounts from the extension's built-in faucet.
 
 ## Troubleshooting
 
-| Symptom                                 | Meaning                                                                                                            |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `wallet_status` errors                  | Extension closed or locked. Open Veilpay, unlock, retry.                                                           |
-| Status pill “Waiting for the AI client” | Paired but the bridge is unreachable: local — is `node mcp/veilpay-mcp.mjs` running? relay — is the service awake? |
-| 401 from the relay                      | Token no longer matches (relay restarted, or disconnected) — re-connect from Settings → Agent.                     |
-| Connector creation fails in ChatGPT     | The URL must be public `https://`; check with the smoke script. Also verify your plan allows custom connectors.    |
-| First request after idle is slow        | Free-plan cold start (~30–60 s). It succeeds on retry.                                                             |
+| Symptom                                 | Meaning                                                                                                                |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `wallet_status` errors                  | Extension closed or locked. Open Veilpay, unlock, retry.                                                               |
+| Status pill “Waiting for the AI client” | Paired but the bridge is unreachable: local — is `node mcp/veilpay-mcp.mjs` running? relay — is the service awake?     |
+| 401 from the relay                      | Token no longer matches (relay restarted, or disconnected) — re-connect from Settings → Agent.                         |
+| Connector creation fails in ChatGPT     | The URL must be public `https://`; check with the smoke script. Also verify your plan allows custom connectors.        |
+| Pairing code is invalid or expired      | Codes are single-use and valid for 10 minutes. Open Settings → Agent, connect again if needed, and enter a fresh code. |
+| First request after idle is slow        | Free-plan cold start (~30–60 s). It succeeds on retry.                                                                 |

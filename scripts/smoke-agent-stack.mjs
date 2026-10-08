@@ -76,7 +76,7 @@ async function runExtensionPoller(base, headers, handle, signal) {
 }
 
 /** Performs the OAuth handshake an MCP client performs, and returns a bearer token. */
-async function obtainBearerToken(base, walletId) {
+async function obtainBearerToken(base, pairingCode) {
   const verifier = base64url(randomBytes(32));
   const challenge = base64url(createHash('sha256').update(verifier).digest());
   const redirectUri = 'https://client.example/callback';
@@ -95,12 +95,13 @@ async function obtainBearerToken(base, walletId) {
     response_type: 'code',
     code_challenge: challenge,
     code_challenge_method: 'S256',
-    wallet: walletId,
     state: 'smoke',
   });
 
   const approval = await fetch(`${base}/authorize/approve?${params}`, {
     method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ pairing_code: pairingCode }),
     redirect: 'manual',
   });
   if (approval.status !== 302) {
@@ -125,8 +126,8 @@ async function obtainBearerToken(base, walletId) {
 }
 
 /** One MCP request over Streamable HTTP, as the AI client sends it. */
-async function mcpRequest(base, walletId, bearer, message) {
-  const response = await fetch(`${base}/mcp/${walletId}`, {
+async function mcpRequest(base, bearer, message) {
+  const response = await fetch(`${base}/mcp`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -170,7 +171,7 @@ async function smokeRelay() {
     );
 
     // A client that never authenticated must be pointed at the OAuth metadata.
-    const anonymousRaw = await fetch(`${base}/mcp/${registration.walletId}`, {
+    const anonymousRaw = await fetch(`${base}/mcp`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'tools/list' }),
@@ -196,9 +197,15 @@ async function smokeRelay() {
       typeof pr.resource === 'string' && Array.isArray(pr.authorization_servers)
     );
 
-    const bearer = await obtainBearerToken(base, registration.walletId);
+    const pairingPage = await fetch(`${base}/authorize?client_id=universal-smoke`);
+    check(
+      'universal authorize route shows the pairing page',
+      pairingPage.status === 200 && (await pairingPage.text()).includes('pairing_code')
+    );
 
-    const init = await mcpRequest(base, registration.walletId, bearer, {
+    const bearer = await obtainBearerToken(base, registration.pairing.code);
+
+    const init = await mcpRequest(base, bearer, {
       jsonrpc: '2.0',
       id: 1,
       method: 'initialize',
@@ -210,13 +217,13 @@ async function smokeRelay() {
     );
 
     // A notification must be accepted with 202 and never answered.
-    const notification = await mcpRequest(base, registration.walletId, bearer, {
+    const notification = await mcpRequest(base, bearer, {
       jsonrpc: '2.0',
       method: 'notifications/initialized',
     });
     check('notification is accepted with 202', notification.status === 202);
 
-    const listed = await mcpRequest(base, registration.walletId, bearer, {
+    const listed = await mcpRequest(base, bearer, {
       jsonrpc: '2.0',
       id: 2,
       method: 'tools/list',
@@ -230,7 +237,7 @@ async function smokeRelay() {
     // The full payment round trip: MCP call → relay queue → extension poll →
     // result → MCP response. This is the exact path a "what's my balance"
     // prompt takes.
-    const balance = await mcpRequest(base, registration.walletId, bearer, {
+    const balance = await mcpRequest(base, bearer, {
       jsonrpc: '2.0',
       id: 3,
       method: 'tools/call',
@@ -459,7 +466,7 @@ async function smokeRemote(origin) {
       typeof as.token_endpoint === 'string'
   );
 
-  const challenge = await fetch(`${origin}/mcp/00000000-0000-0000-0000-000000000000`, {
+  const challenge = await fetch(`${origin}/mcp`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),

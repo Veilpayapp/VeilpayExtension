@@ -30,24 +30,53 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import http from 'node:http';
 import { createBridge, tokenMatches } from '../mcp/bridge.mjs';
 import { handleMcpMessage } from '../mcp/veilpay-mcp.mjs';
-import {
-  authorizationServerMetadata,
-  createOAuth,
-  protectedResourceMetadata,
-} from './oauth.mjs';
+import { authorizationServerMetadata, createOAuth, protectedResourceMetadata } from './oauth.mjs';
 
 export const DEFAULT_PORT = 8788;
 
 /** A wallet with no activity for this long is reclaimed. */
 export const WALLET_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 
+/** How long a pairing code remains valid. */
+export const PAIRING_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Crockford base32: no I, L, O, U — the characters people misread and mistype.
+ * Eight characters is 40 bits of entropy, which at ten minutes of validity and
+ * single use is far past the point where guessing is cheaper than phishing.
+ */
+const PAIRING_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+
+/** 256 % 32 === 0, so indexing by a random byte has no modulo bias. */
+function randomPairingCode() {
+  const bytes = randomBytes(8);
+  let code = '';
+  for (let i = 0; i < 8; i += 1) {
+    code += PAIRING_ALPHABET[bytes[i] % PAIRING_ALPHABET.length];
+  }
+  return `${code.slice(0, 4)}-${code.slice(4)}`;
+}
+
+/** Accepts what a human typed: lowercase, spaces, dots, and I/L/O confusions. */
+export function normalizePairingCode(input) {
+  return String(input ?? '')
+    .toUpperCase()
+    .replace(/[IL]/g, '1')
+    .replace(/O/g, '0')
+    .replace(/[^0-9A-Z]/g, '');
+}
+
 export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}) {
   /** walletId → { secret, createdAt, bridge } */
   const wallets = new Map();
+  /** pairing code (normalized) → { walletId, expiresAt } */
+  const pairingCodes = new Map();
+  /** walletId → its one live pairing code. */
+  const walletPairingCode = new Map();
   const oauth = createOAuth({ now, wallets });
 
   function walletFor(id) {
-    return typeof id === 'string' ? wallets.get(id) ?? null : null;
+    return typeof id === 'string' ? (wallets.get(id) ?? null) : null;
   }
 
   function sweep() {
@@ -56,9 +85,71 @@ export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}
       if (wallet.createdAt < cutoff) {
         wallet.bridge.stop();
         oauth.revokeWallet(id);
+        dropPairingCode(id);
         wallets.delete(id);
       }
     }
+    for (const [code, entry] of pairingCodes) {
+      if (entry.expiresAt < now()) {
+        if (walletPairingCode.get(entry.walletId) === code) {
+          walletPairingCode.delete(entry.walletId);
+        }
+        pairingCodes.delete(code);
+      }
+    }
+  }
+
+  function dropPairingCode(walletId) {
+    const code = walletPairingCode.get(walletId);
+    if (code === undefined) return;
+    walletPairingCode.delete(walletId);
+    pairingCodes.delete(code);
+  }
+
+  /** The human-readable shape of a stored (normalized) pairing key. */
+  function formatPairingCode(key) {
+    return `${key.slice(0, 4)}-${key.slice(4)}`;
+  }
+
+  /**
+   * One live code per wallet: issuing replaces the previous, so a code the
+   * user is looking at can never be silently swapped for another.
+   *
+   * The map key is the normalized form (what `consumePairingCode` looks up); the
+   * returned `code` is the display form, because that is what a human reads.
+   */
+  function issuePairingCode(walletId) {
+    sweep();
+    const current = walletPairingCode.get(walletId);
+    const entry = current === undefined ? undefined : pairingCodes.get(current);
+    if (entry !== undefined && entry.expiresAt >= now()) {
+      return { code: formatPairingCode(current), expiresAt: entry.expiresAt };
+    }
+    if (current !== undefined) {
+      pairingCodes.delete(current);
+      walletPairingCode.delete(walletId);
+    }
+    const key = normalizePairingCode(randomPairingCode());
+    const expiresAt = now() + PAIRING_TTL_MS;
+    pairingCodes.set(key, { walletId, expiresAt });
+    walletPairingCode.set(walletId, key);
+    return { code: formatPairingCode(key), expiresAt };
+  }
+
+  /**
+   * Single use: the code is burned whether it was valid, expired, or never
+   * existed. An expired code is consumed but resolves to no wallet.
+   */
+  function consumePairingCode(input) {
+    sweep();
+    const code = normalizePairingCode(input);
+    const entry = pairingCodes.get(code);
+    pairingCodes.delete(code);
+    if (entry === undefined) return null;
+    if (walletPairingCode.get(entry.walletId) === code) {
+      walletPairingCode.delete(entry.walletId);
+    }
+    return entry.expiresAt >= now() ? entry.walletId : null;
   }
 
   /** Registers a wallet for the extension. The secret never leaves that pair. */
@@ -70,10 +161,10 @@ export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}
       secret,
       createdAt: now(),
       bridge: createBridge(
-        longPollMs === undefined ? { token: secret, now } : { token: secret, now, longPollMs },
+        longPollMs === undefined ? { token: secret, now } : { token: secret, now, longPollMs }
       ),
     });
-    return { walletId, secret };
+    return { walletId, secret, pairing: issuePairingCode(walletId) };
   }
 
   function authenticateWallet(headers) {
@@ -125,7 +216,22 @@ export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}
         json(response, 200, { id: next.id, tool: next.tool, args: next.args });
         return;
       }
-      json(response, 200, { ok: true, settled: wallet.bridge.settle(String(body?.id ?? ''), body ?? {}) });
+      json(response, 200, {
+        ok: true,
+        settled: wallet.bridge.settle(String(body?.id ?? ''), body ?? {}),
+      });
+      return;
+    }
+
+    // A fresh pairing code for an already-registered wallet: the extension
+    // shows it where the universal connector URL ends up needing it.
+    if (request.method === 'POST' && path === '/wallet/pairing-code') {
+      const walletId = request.headers['x-veilpay-wallet'];
+      if (typeof walletId !== 'string' || authenticateWallet(request.headers) === null) {
+        json(response, 401, { ok: false, error: 'Unknown wallet or bad secret.' });
+        return;
+      }
+      json(response, 200, { ok: true, ...issuePairingCode(walletId) });
       return;
     }
 
@@ -140,10 +246,7 @@ export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}
       return;
     }
     // Some clients probe the resource-scoped path first, per RFC 9728.
-    if (
-      request.method === 'GET' &&
-      path === '/.well-known/oauth-protected-resource/mcp'
-    ) {
+    if (request.method === 'GET' && path === '/.well-known/oauth-protected-resource/mcp') {
       json(response, 200, protectedResourceMetadata(origin));
       return;
     }
@@ -156,15 +259,40 @@ export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}
     // and deliberately readable by a human: it says which wallet is being
     // connected and what the agent will be able to do.
     if (request.method === 'GET' && path === '/authorize') {
-      const walletId = url.searchParams.get('wallet');
-      const known = walletFor(walletId) !== null;
-      html(response, 200, consentPage(url, origin, known));
+      // Per RFC 8707 the client names the wallet through `resource`; some
+      // clients also send `wallet`. Neither existing means the universal
+      // connector URL was pasted: the human then supplies the wallet by
+      // pairing code.
+      const walletId = oauth.walletFromAuthorize(Object.fromEntries(url.searchParams));
+      if (walletId === null) {
+        html(response, 200, pairingPage(url));
+        return;
+      }
+      html(response, 200, consentPage(url, origin, walletFor(walletId) !== null));
       return;
     }
     if (request.method === 'POST' && path === '/authorize/approve') {
-      // The consent form posts as application/x-www-form-urlencoded, so the
-      // params ride in the query string rather than a JSON body.
-      const params = Object.fromEntries(url.searchParams);
+      // The consent form posts as application/x-www-form-urlencoded: the
+      // hidden fields ride the query string of the action, the human-typed
+      // pairing code rides in the body. Both merge into one parameter set.
+      const form = body !== null && typeof body === 'object' && !Array.isArray(body) ? body : {};
+      const params = { ...Object.fromEntries(url.searchParams), ...form };
+      // The universal connector URL carries no wallet, so the pairing code the
+      // human just typed is what binds this authorization to their wallet.
+      if (oauth.walletFromAuthorize(params) === null) {
+        const walletId = consumePairingCode(params.pairing_code);
+        if (walletId === null) {
+          html(
+            response,
+            400,
+            errorPage(
+              'That pairing code is not valid or has expired. Open Veilpay → Settings → Agent for a fresh code.'
+            )
+          );
+          return;
+        }
+        params.wallet = walletId;
+      }
       const result = oauth.authorize(params);
       if (!result.ok) {
         html(response, 400, errorPage(result.error));
@@ -183,14 +311,19 @@ export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}
       return;
     }
 
-    // --- The MCP endpoint itself. The wallet id is in the path so nothing has to
-    // be copied by hand, but the path only *names* the wallet — it must never
-    // authorise. Without a valid token the request is refused and pointed at the
-    // metadata document, which is what makes the client start OAuth.
+    // --- The MCP endpoint itself. Two shapes share it: the universal
+    // `POST /mcp` (the one URL everyone pastes, wallet resolved by the bearer
+    // token alone) and `POST /mcp/<walletId>` (the wallet rides in the path).
+    // The path only *names* a wallet — it must never authorise. Without a
+    // valid token the request is refused and pointed at the metadata
+    // document, which is what makes the client start OAuth.
     if (path.startsWith('/mcp')) {
-      const walletId = path.slice('/mcp'.length).replace(/^\//, '');
+      const walletIdInPath = path.slice('/mcp'.length).replace(/^\//, '');
       const resolved = oauth.resolveToken(request.headers.authorization);
-      const wallet = resolved !== null && resolved === walletId ? walletFor(resolved) : null;
+      const wallet =
+        resolved !== null && (walletIdInPath === '' || walletIdInPath === resolved)
+          ? walletFor(resolved)
+          : null;
       if (wallet === null) {
         // Advertise where to authenticate; MCP clients use this to start OAuth.
         json(
@@ -201,7 +334,9 @@ export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}
             id: null,
             error: { code: -32001, message: 'Unauthorized.' },
           },
-          { 'www-authenticate': `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource"` },
+          {
+            'www-authenticate': `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource"`,
+          }
         );
         return;
       }
@@ -221,6 +356,8 @@ export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}
   function stop() {
     for (const wallet of wallets.values()) wallet.bridge.stop();
     wallets.clear();
+    pairingCodes.clear();
+    walletPairingCode.clear();
   }
 
   return {
@@ -229,6 +366,8 @@ export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}
     authenticateWallet,
     oauth,
     stop,
+    issuePairingCode,
+    consumePairingCode,
     walletCount: () => wallets.size,
   };
 }
@@ -307,7 +446,7 @@ function escapeHtml(value) {
   return String(value ?? '').replace(
     /[&<>"']/g,
     (char) =>
-      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char] ?? char,
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char] ?? char
   );
 }
 
@@ -325,6 +464,11 @@ const PAGE_STYLE = `
          color:#FAFAFA; word-break:break-all; }
   button { width:100%; padding:12px; border:0; border-radius:12px; cursor:pointer;
            background:#F59E0B; color:#0A0A0A; font-size:15px; font-weight:600; }
+  input { width:100%; padding:12px; margin-bottom:12px; border:1px solid #2A2A2A;
+          border-radius:12px; background:#0A0A0A; color:#FAFAFA;
+          font:16px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;
+          text-align:center; letter-spacing:2px; }
+  input:focus { outline:2px solid #F59E0B; outline-offset:-1px; }
   .muted { margin-top:14px; font-size:12px; color:#71717A; }
 `;
 
@@ -332,6 +476,28 @@ function shell(body) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Veilpay</title><style>${PAGE_STYLE}</style></head><body><main>${body}</main></body></html>`;
+}
+
+/** Keys a consent or pairing form must echo back on approve. */
+const APPROVE_FIELDS = [
+  'client_id',
+  'redirect_uri',
+  'code_challenge',
+  'code_challenge_method',
+  'response_type',
+  'state',
+  'resource',
+  'wallet',
+];
+
+function hiddenFields(params) {
+  return [...params.entries()]
+    .filter(([key]) => APPROVE_FIELDS.includes(key))
+    .map(
+      ([key, value]) =>
+        `<input type="hidden" name="${escapeHtml(key)}" value="${escapeHtml(value)}">`
+    )
+    .join('');
 }
 
 /**
@@ -343,13 +509,6 @@ function shell(body) {
 function consentPage(url, origin, walletKnown) {
   const params = url.searchParams;
   const walletId = escapeHtml(params.get('wallet'));
-  const hidden = [...params.entries()]
-    .filter(([key]) => ['client_id', 'redirect_uri', 'code_challenge', 'code_challenge_method', 'response_type', 'state', 'wallet'].includes(key))
-    .map(
-      ([key, value]) =>
-        `<input type="hidden" name="${escapeHtml(key)}" value="${escapeHtml(value)}">`,
-    )
-    .join('');
 
   if (!walletKnown) {
     return shell(`<h1>Wallet not connected</h1>
@@ -367,9 +526,35 @@ function consentPage(url, origin, walletKnown) {
     </ul>
     <p class="muted">Wallet <code>${walletId}</code></p>
     <form method="post" action="/authorize/approve?${escapeHtml(url.searchParams.toString())}">
-      ${hidden}
+      ${hiddenFields(params)}
       <button type="submit">Approve and connect</button>
     </form>`);
+}
+
+/**
+ * The pairing page for the universal connector URL.
+ *
+ * The URL everyone pastes carries no wallet identity, so this page asks for the
+ * one thing that can supply it: the short code the extension is showing. It is
+ * the same trust gesture as a TV sign-in code — short-lived, single use, and
+ * typed by the human who owns the wallet.
+ */
+function pairingPage(url) {
+  return shell(`<h1>Connect your Veilpay wallet</h1>
+    <p>Enter the pairing code shown in the Veilpay extension
+       (Settings &rarr; Agent).</p>
+    <form method="post" action="/authorize/approve?${escapeHtml(url.searchParams.toString())}">
+      ${hiddenFields(url.searchParams)}
+      <input name="pairing_code" autocomplete="off" autocapitalize="characters"
+             spellcheck="false" placeholder="XXXX-XXXX" aria-label="Veilpay pairing code">
+      <button type="submit">Pair and connect</button>
+    </form>
+    <ul>
+      <li>The AI client will be able to <strong>ask</strong> for testnet payments.</li>
+      <li>Your spending caps and approval prompts still apply.</li>
+    </ul>
+    <p class="muted">Don't have a code? Install the Veilpay extension, then
+      Settings &rarr; Agent.</p>`);
 }
 
 function errorPage(message) {
@@ -406,12 +591,12 @@ if (isMain) {
   startRelay(port, createRelay(publicUrl === undefined ? {} : { baseUrl: publicUrl }))
     .then(({ port: actual }) => {
       process.stderr.write(
-        `[veilpay-relay] listening on ${process.env.VEILPAY_RELAY_HOST ?? '127.0.0.1'}:${actual}\n`,
+        `[veilpay-relay] listening on ${process.env.VEILPAY_RELAY_HOST ?? '127.0.0.1'}:${actual}\n`
       );
       process.stderr.write(
         publicUrl === undefined
           ? '[veilpay-relay] set VEILPAY_RELAY_PUBLIC_URL so OAuth metadata advertises the public origin.\n'
-          : `[veilpay-relay] public origin: ${publicUrl}\n`,
+          : `[veilpay-relay] public origin: ${publicUrl}\n`
       );
     })
     .catch((cause) => {

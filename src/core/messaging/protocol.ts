@@ -19,7 +19,14 @@ import type { Grant } from '@/core/vap/grant';
  *    never trusted from the payload.
  */
 
-export const MessageSource = z.enum(['popup', 'options', 'sidepanel', 'content', 'inpage', 'offscreen']);
+export const MessageSource = z.enum([
+  'popup',
+  'options',
+  'sidepanel',
+  'content',
+  'inpage',
+  'offscreen',
+]);
 export type MessageSource = z.infer<typeof MessageSource>;
 
 /** Mirrors `Chain` in `@/core/vault/key-derivation`, declared here so the wire
@@ -86,6 +93,7 @@ export const RequestKind = z.enum([
   'agent.status',
   'agent.configure',
   'agent.relay.register',
+  'agent.relay.pairing-code',
   'agent.disable',
 ]);
 export type RequestKind = z.infer<typeof RequestKind>;
@@ -159,6 +167,7 @@ export const PRIVILEGED_KINDS: readonly RequestKind[] = [
   // never a page, content script, or the offscreen document.
   'agent.configure',
   'agent.relay.register',
+  'agent.relay.pairing-code',
   'agent.disable',
 ] as const;
 
@@ -239,41 +248,46 @@ const MaxUint256 = 2n ** 256n - 1n;
 const NativeDecimal = z
   .string()
   .regex(/^(0|[1-9]\d*)(\.\d+)?$/, 'Amount must be a non-negative decimal number.')
-  .refine((value) => {
-    // Bound the magnitude so conversion cannot overflow a uint256 base amount.
-    // Guard the BigInt math: zod runs this refine even when the regex above
-    // failed, so a non-numeric input must yield `false`, not throw.
-    const m = /^(0|[1-9]\d*)(?:\.(\d+))?$/.exec(value);
-    if (m === null) return false;
-    const whole = m[1] ?? '0';
-    const frac = m[2] ?? '';
-    const scaleRequired = frac.length;
-    if (scaleRequired > 30) return false;
-    let scaled: bigint;
-    try {
-      scaled = BigInt(whole) * 10n ** BigInt(scaleRequired) + BigInt(frac || '0');
-    } catch {
-      return false;
-    }
-    return scaled <= MaxUint256;
-  }, { message: 'Amount is outside the representable range.' });
+  .refine(
+    (value) => {
+      // Bound the magnitude so conversion cannot overflow a uint256 base amount.
+      // Guard the BigInt math: zod runs this refine even when the regex above
+      // failed, so a non-numeric input must yield `false`, not throw.
+      const m = /^(0|[1-9]\d*)(?:\.(\d+))?$/.exec(value);
+      if (m === null) return false;
+      const whole = m[1] ?? '0';
+      const frac = m[2] ?? '';
+      const scaleRequired = frac.length;
+      if (scaleRequired > 30) return false;
+      let scaled: bigint;
+      try {
+        scaled = BigInt(whole) * 10n ** BigInt(scaleRequired) + BigInt(frac || '0');
+      } catch {
+        return false;
+      }
+      return scaled <= MaxUint256;
+    },
+    { message: 'Amount is outside the representable range.' }
+  );
 
 /**
  * A Stellar asset to pay in. Defaults to native XLM. An issued token is
  * identified by its asset code and issuer address so the payment op is built
  * with the correct ASSET_TYPE_CREDIT_ALPHANUM4/12.
  */
-const StellarAsset = z.object({
-  type: z.literal('native'),
-}).or(
-  z.object({
-    type: z.literal('issued'),
-    /** Asset code, 1–12 chars (ASCII). */
-    code: z.string().regex(/^[A-Za-z0-9]{1,12}$/),
-    /** Issuer Stellar strkey (G...). */
-    issuer: z.string().regex(/^G[A-Z2-7]{55}$/),
-  }),
-);
+const StellarAsset = z
+  .object({
+    type: z.literal('native'),
+  })
+  .or(
+    z.object({
+      type: z.literal('issued'),
+      /** Asset code, 1–12 chars (ASCII). */
+      code: z.string().regex(/^[A-Za-z0-9]{1,12}$/),
+      /** Issuer Stellar strkey (G...). */
+      issuer: z.string().regex(/^G[A-Z2-7]{55}$/),
+    })
+  );
 export type StellarAssetInput = z.infer<typeof StellarAsset>;
 
 /**
@@ -802,6 +816,11 @@ export const AgentRelayRegisterRequest = baseEnvelope.extend({
   }),
 });
 
+export const AgentRelayPairingCodeRequest = baseEnvelope.extend({
+  kind: z.literal('agent.relay.pairing-code'),
+  payload: z.object({}),
+});
+
 export const AgentDisableRequest = baseEnvelope.extend({
   kind: z.literal('agent.disable'),
   payload: z.object({}),
@@ -865,6 +884,7 @@ export const Request = z.discriminatedUnion('kind', [
   AgentStatusRequest,
   AgentConfigureRequest,
   AgentRelayRegisterRequest,
+  AgentRelayPairingCodeRequest,
   AgentDisableRequest,
 ]);
 export type Request = z.infer<typeof Request>;
@@ -1046,7 +1066,12 @@ export interface ResponseData {
   'eth.rpc': { result: unknown };
   /** EIP-712 signature (65-byte `r || s || v` hex) for typed data. */
   'eth.signTypedData': { signature: string };
-  'permissions.list': Array<{ origin: string; addresses: string[]; createdAt: number; lastUsedAt: number }>;
+  'permissions.list': Array<{
+    origin: string;
+    addresses: string[];
+    createdAt: number;
+    lastUsedAt: number;
+  }>;
   'permissions.grant': { ok: boolean };
   'permissions.revoke': { ok: boolean };
   'permissions.pending': {
@@ -1168,12 +1193,14 @@ export interface ResponseData {
     lastPollAt: number | null;
   };
   'agent.configure': { ok: boolean };
-  /** Relay registration: the URL the user adds as a remote MCP server. */
+  /** Relay registration: the single public URL shared by all Veilpay users. */
   'agent.relay.register': {
     mcpUrl: string;
-    /** Identifies this wallet; lives in the URL path, not a shared secret. */
     walletId: string;
+    pairingCode: string;
+    pairingCodeExpiresAt: number;
   };
+  'agent.relay.pairing-code': { pairingCode: string; pairingCodeExpiresAt: number };
   'agent.disable': { ok: boolean };
 }
 

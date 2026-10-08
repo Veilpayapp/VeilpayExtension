@@ -3,7 +3,7 @@
 Lets Claude (or any MCP client) pay from your Veilpay wallet:
 
 > **You:** send 1 SOL to `9xQe...`
-> **Claude:** *(calls `send_payment`)*
+> **Claude:** _(calls `send_payment`)_
 > **Wallet:** sends it — or asks you to approve first, if it's above your cap.
 
 Free, local, no accounts, no hosting. See `docs/AGENT_PAYMENTS.md` for the
@@ -31,10 +31,10 @@ bridge** to connect the wallet.
 
 Environment overrides:
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `VEILPAY_BRIDGE_PORT` | `8765` | Port the extension polls. |
-| `VEILPAY_MCP_CONFIG` | `~/.veilpay-mcp/config.json` | Token location. |
+| Variable              | Default                      | Purpose                   |
+| --------------------- | ---------------------------- | ------------------------- |
+| `VEILPAY_BRIDGE_PORT` | `8765`                       | Port the extension polls. |
+| `VEILPAY_MCP_CONFIG`  | `~/.veilpay-mcp/config.json` | Token location.           |
 
 Check it is up: `curl http://127.0.0.1:8765/health`
 
@@ -64,14 +64,14 @@ directory.
 
 ## Tools
 
-| Tool | Purpose |
-| --- | --- |
-| `wallet_status` | Is the extension reachable and unlocked? |
-| `list_accounts` | Wallet addresses, one per chain. |
-| `get_balance` | Balance for a chain (or any address). |
-| `send_payment` | Send funds. `amount` is a decimal like `"1"` or `"0.05"`. |
-| `list_grants` | Active spending caps. |
-| `revoke_grant` | Stop an autonomous spending grant. |
+| Tool            | Purpose                                                   |
+| --------------- | --------------------------------------------------------- |
+| `wallet_status` | Is the extension reachable and unlocked?                  |
+| `list_accounts` | Wallet addresses, one per chain.                          |
+| `get_balance`   | Balance for a chain (or any address).                     |
+| `send_payment`  | Send funds. `amount` is a decimal like `"1"` or `"0.05"`. |
+| `list_grants`   | Active spending caps.                                     |
+| `revoke_grant`  | Stop an autonomous spending grant.                        |
 
 ## Limits worth knowing
 

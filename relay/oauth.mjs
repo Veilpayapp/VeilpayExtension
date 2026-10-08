@@ -10,15 +10,17 @@
  *   1. Client fetches `/.well-known/oauth-protected-resource` and
  *      `/.well-known/oauth-authorization-server`.
  *   2. Client registers itself via dynamic client registration (`POST /register`).
- *   3. Client sends the user to `/authorize`; we show a page and issue a code.
+ *   3. Client sends the user to `/authorize`; we show a consent or pairing page
+ *      and issue a code.
  *   4. Client exchanges the code at `/token` for a bearer token.
  *   5. Client calls `/mcp` with `Authorization: Bearer …`.
  *
  * PKCE (S256) is required, which is the one detail that matters here: without it
  * an intercepted authorization code is directly replayable.
  *
- * The wallet identity is carried in the resource path (`/mcp/<walletId>`) rather
- * than in a code the user types, so the entire setup is "approve this page".
+ * The wallet identity is carried in the resource path (`/mcp/<walletId>`) for
+ * wallet-scoped URLs, or supplied by the human through a short-lived pairing
+ * code on the consent page when the universal connector URL `/mcp` is used.
  */
 
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -107,11 +109,14 @@ export function createOAuth({ now = () => Date.now(), wallets } = {}) {
   }
 
   /**
-   * Extracts the wallet an authorization request is for.
+   * Extracts the wallet an authorization request is for, or null when the
+   * request carries none.
    *
    * Per RFC 8707 and the MCP spec, a client asks for a token for a specific
-   * `resource`, which here is `…/mcp/<walletId>`. That is the authoritative
-   * signal; `wallet` is accepted as a fallback for clients that omit it.
+   * `resource`, which for a wallet-scoped URL is `…/mcp/<walletId>`. That is
+   * the authoritative signal; `wallet` is accepted as a fallback for clients
+   * that omit it. A null return means the universal connector URL was used and
+   * the caller must resolve the wallet another way (the pairing code).
    */
   function walletFromAuthorize(params) {
     const resource = params.resource;

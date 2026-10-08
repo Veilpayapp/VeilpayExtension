@@ -1,8 +1,8 @@
 # Agent relay — deploy this so users install nothing
 
-Lets an AI client pay from Veilpay with **one click**. The user never runs Node,
-never copies a token: the extension registers here, and the client's OAuth
-discovery does the rest.
+Lets an AI client pay from Veilpay with **one public URL**. The team deploys this
+relay once; each extension registers here and polls out, while the AI client's
+OAuth discovery and pairing page bind the connector to the right wallet.
 
 [![Deploy to Render](https://render.com/images/deploy-logo.svg)](https://render.com/deploy?repo=https://github.com/chiragchanchal/VeilpayExtension)
 
@@ -11,7 +11,9 @@ Free-tier one-click deploy via the `render.yaml` blueprint in the repo root; a
 end users do in ChatGPT/Claude: `docs/MCP_SETUP.md`.
 
 ```
-Veilpay extension ──outbound poll──► relay ◄──Streamable HTTP + OAuth── Claude / ChatGPT
+Veilpay extension ──outbound poll──► relay ◄──universal /mcp + OAuth── Claude / ChatGPT
+                                             ▲
+                                  pairing code on consent page
 ```
 
 An extension can never be reached inbound, so the relay is the only way to make
@@ -34,11 +36,11 @@ Blueprint → this repo (`render.yaml` at the repo root is the blueprint).
 Any other host that runs Node 20+ and terminates TLS also works (a
 `Dockerfile` is included). Set:
 
-| Variable | Required | Value |
-| --- | --- | --- |
-| `VEILPAY_RELAY_PUBLIC_URL` | no | `https://your-relay.example` — only if a proxy strips the forwarded headers Render and friends set. |
-| `PORT` | no | Injected by most hosts. |
-| `VEILPAY_RELAY_HOST` | no | `0.0.0.0` to accept external traffic (the blueprint and Dockerfile set this). |
+| Variable                   | Required | Value                                                                                               |
+| -------------------------- | -------- | --------------------------------------------------------------------------------------------------- |
+| `VEILPAY_RELAY_PUBLIC_URL` | no       | `https://your-relay.example` — only if a proxy strips the forwarded headers Render and friends set. |
+| `PORT`                     | no       | Injected by most hosts.                                                                             |
+| `VEILPAY_RELAY_HOST`       | no       | `0.0.0.0` to accept external traffic (the blueprint and Dockerfile set this).                       |
 
 `VEILPAY_RELAY_PUBLIC_URL` matters: OAuth metadata must advertise the public
 `https://` origin, and the client rejects the discovery if it doesn't match what
@@ -48,23 +50,26 @@ right behind a proxy but wrong if the headers are absent.
 TLS is not optional — MCP clients only connect to `https://`, and a bearer token
 over plaintext is a credential in the clear.
 
-No persistent state: wallets live in memory. A restart drops pairings, and the
-user re-runs the one-click flow. Add a store before running this for real.
+No persistent state: wallets and pairings live in memory. A restart drops
+pairings, and users re-connect from the extension. Add a store before running
+this for real.
 
 ## Endpoints
 
-| Path | Purpose |
-| --- | --- |
-| `GET /health` | Liveness; no auth. |
-| `POST /wallet/register` | The extension registers; returns a wallet id + secret. |
-| `GET /next`, `POST /result` | The extension's authenticated long-poll. |
-| `GET /.well-known/oauth-authorization-server` | OAuth discovery. |
-| `GET /.well-known/oauth-protected-resource` | Resource discovery (RFC 9728). |
-| `POST /register` | Dynamic client registration. |
-| `GET /authorize` | The consent page a human sees. |
-| `POST /authorize/approve` | Approves and redirects with a code. |
-| `POST /token` | Exchanges a code (PKCE S256, single use) for a bearer token. |
-| `POST /mcp/<walletId>` | Remote MCP. Requires `Authorization: Bearer …`. |
+| Path                                          | Purpose                                                                                             |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `GET /health`                                 | Liveness; no auth.                                                                                  |
+| `POST /wallet/register`                       | The extension registers; returns a wallet id + secret + initial pairing code.                       |
+| `POST /wallet/pairing-code`                   | Issues or returns the wallet's current 10-minute pairing code.                                      |
+| `GET /next`, `POST /result`                   | The extension's authenticated long-poll.                                                            |
+| `GET /.well-known/oauth-authorization-server` | OAuth discovery.                                                                                    |
+| `GET /.well-known/oauth-protected-resource`   | Resource discovery (RFC 9728).                                                                      |
+| `POST /register`                              | Dynamic client registration.                                                                        |
+| `GET /authorize`                              | Pairing-code page for universal `/mcp`, or consent page for a wallet URL.                           |
+| `POST /authorize/approve`                     | Consumes the pairing code when needed, then approves and redirects with a code.                     |
+| `POST /token`                                 | Exchanges a code (PKCE S256, single use) for a bearer token.                                        |
+| `POST /mcp`                                   | Universal remote MCP endpoint. Requires `Authorization: Bearer …`; the token identifies the wallet. |
+| `POST /mcp/<walletId>`                        | Backward-compatible remote MCP endpoint. Requires `Authorization: Bearer …`.                        |
 
 ## Security posture
 
@@ -73,7 +78,7 @@ to be safely operated by someone you would not otherwise trust:
 
 - It holds no key material and cannot sign anything.
 - It **cannot authorise a payment**. Spending caps and the approval prompt live
-  inside the extension, so the relay can only *ask*. A fully compromised relay
+  inside the extension, so the relay can only _ask_. A fully compromised relay
   is reduced to spamming requests, which the extension's prompt limiter and the
   user's own caps bound.
 - It **does** see payment metadata (amount, recipient), because it routes it.
@@ -82,7 +87,9 @@ to be safely operated by someone you would not otherwise trust:
 
 What is enforced here: PKCE S256 on every exchange, single-use authorization
 codes, registered-redirect validation (no open redirect), constant-time secret
-comparison, and a strict CSP on the consent page.
+comparison, and a strict CSP on the consent page. Pairing codes are 10-minute,
+single-use Crockford-base32 codes with 40 bits of entropy; guessing is bounded by
+the short TTL and single-use consumption.
 
 ## The honest gap to retail
 

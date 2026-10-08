@@ -84,10 +84,16 @@ function handlers(overrides: Partial<HandlerMap> = {}): HandlerMap {
     'vap.grant.request': async () => ({ grantId: 'grant-1' }),
     'vap.grant.resolve': async () => ({ ok: true }),
     'vap.grant.pending': async () => null,
-    'account.exportKey': async () => ({ privateKey: '0x00', address: '0x0000000000000000000000000000000000000000' }),
+    'account.exportKey': async () => ({
+      privateKey: '0x00',
+      address: '0x0000000000000000000000000000000000000000',
+    }),
     'solana.connect': async () => ({ publicKey: '11111111111111111111111111111111' }),
     'solana.signTransaction': async () => ({ signature: 'sig', signedTransaction: 'tx' }),
-    'solana.signMessage': async () => ({ signature: 'sig', publicKey: '11111111111111111111111111111111' }),
+    'solana.signMessage': async () => ({
+      signature: 'sig',
+      publicKey: '11111111111111111111111111111111',
+    }),
     'wc.pair': async () => ({ ok: true }),
     'wc.proposal.pending': async () => null,
     'wc.proposal.approve': async () => ({ ok: true }),
@@ -106,8 +112,14 @@ function handlers(overrides: Partial<HandlerMap> = {}): HandlerMap {
     }),
     'agent.configure': async () => ({ ok: true }),
     'agent.relay.register': async () => ({
-      mcpUrl: 'https://relay.example/mcp/wallet-1',
+      mcpUrl: 'https://relay.example/mcp',
       walletId: 'wallet-1',
+      pairingCode: 'ABCD-2F9G',
+      pairingCodeExpiresAt: 10_000,
+    }),
+    'agent.relay.pairing-code': async () => ({
+      pairingCode: 'ABCD-2F9G',
+      pairingCodeExpiresAt: 10_000,
     }),
     'agent.disable': async () => ({ ok: true }),
     'vault.create': async () => ({ state: 'unlocked' as const }),
@@ -123,7 +135,7 @@ describe('message dispatch', () => {
     const response = await dispatch(
       { id: newId(), v: 1, source: 'popup', kind: 'ping', payload: { sentAt: 400 } },
       sender,
-      handlers(),
+      handlers()
     );
 
     expect(response.ok).toBe(true);
@@ -137,7 +149,7 @@ describe('message dispatch', () => {
     const response = await dispatch(
       { id, v: 1, source: 'popup', kind: 'ping', payload: { sentAt: 0 } },
       sender,
-      handlers(),
+      handlers()
     );
 
     expect(response.id).toBe(id);
@@ -148,7 +160,7 @@ describe('message dispatch', () => {
     const response = await dispatch(
       { id: 'not-a-uuid', v: 1, source: 'popup', kind: 'ping', payload: {} },
       sender,
-      handlers({ ping: ping as unknown as HandlerMap['ping'] }),
+      handlers({ ping: ping as unknown as HandlerMap['ping'] })
     );
 
     expect(response.ok).toBe(false);
@@ -160,7 +172,7 @@ describe('message dispatch', () => {
     const response = await dispatch(
       { id: newId(), v: 1, source: 'popup', kind: 'vault.export', payload: {} },
       sender,
-      handlers(),
+      handlers()
     );
 
     expect(response.ok).toBe(false);
@@ -171,7 +183,7 @@ describe('message dispatch', () => {
     const response = await dispatch(
       { id: newId(), v: 2, source: 'popup', kind: 'ping', payload: { sentAt: 0 } },
       sender,
-      handlers(),
+      handlers()
     );
 
     expect(response.ok).toBe(false);
@@ -185,7 +197,7 @@ describe('message dispatch', () => {
         'vault.status': async () => {
           throw new ProtocolError('VAULT_LOCKED', 'The wallet is locked.');
         },
-      }),
+      })
     );
 
     expect(response.ok).toBe(false);
@@ -204,7 +216,7 @@ describe('message dispatch', () => {
         'vault.status': async () => {
           throw new Error(secret);
         },
-      }),
+      })
     );
 
     expect(response.ok).toBe(false);
@@ -231,7 +243,7 @@ describe('message dispatch', () => {
           seen.push(ctx.origin);
           return { state: 'locked' as const, unlockedUntil: null };
         },
-      }),
+      })
     );
 
     expect(seen).toEqual(['https://real.example']);
@@ -255,7 +267,7 @@ describe('privileged kind enforcement', () => {
         payload: { passphrase: 'correct horse battery staple' },
       },
       uiSender,
-      handlers(),
+      handlers()
     );
 
     expect(response.ok).toBe(true);
@@ -272,7 +284,7 @@ describe('privileged kind enforcement', () => {
         payload: { passphrase: 'correct horse battery staple' },
       },
       pageSender, // the truth
-      handlers({ 'vault.unlock': unlock as unknown as HandlerMap['vault.unlock'] }),
+      handlers({ 'vault.unlock': unlock as unknown as HandlerMap['vault.unlock'] })
     );
 
     expect(response.ok).toBe(false);
@@ -291,7 +303,7 @@ describe('privileged kind enforcement', () => {
         payload: { confirmation: 'DELETE' },
       },
       pageSender,
-      handlers({ 'vault.reset': reset as unknown as HandlerMap['vault.reset'] }),
+      handlers({ 'vault.reset': reset as unknown as HandlerMap['vault.reset'] })
     );
 
     expect(response.ok).toBe(false);
@@ -311,7 +323,7 @@ describe('privileged kind enforcement', () => {
         payload: { strength: 256 },
       },
       uiSender,
-      handlers(),
+      handlers()
     );
 
     expect(response.ok).toBe(false);
@@ -330,7 +342,7 @@ describe('privileged kind enforcement', () => {
         payload: { confirmation: 'DELETE' },
       },
       uiSender,
-      handlers(),
+      handlers()
     );
 
     expect(response.ok).toBe(false);
@@ -353,7 +365,7 @@ describe('privileged kind enforcement', () => {
         },
       },
       pageSender,
-      handlers({ 'tx.transfer': transfer as unknown as HandlerMap['tx.transfer'] }),
+      handlers({ 'tx.transfer': transfer as unknown as HandlerMap['tx.transfer'] })
     );
 
     expect(response.ok).toBe(false);
@@ -371,7 +383,7 @@ describe('privileged kind enforcement', () => {
         payload: { passphrase: 'correct horse battery staple' },
       },
       sender, // bare {}, as an unidentifiable caller would be
-      handlers(),
+      handlers()
     );
 
     expect(response.ok).toBe(false);
@@ -382,7 +394,7 @@ describe('privileged kind enforcement', () => {
     const response = await dispatch(
       { id: newId(), v: 1, source: 'content', kind: 'vault.status', payload: {} },
       pageSender,
-      handlers(),
+      handlers()
     );
 
     expect(response.ok).toBe(true);
@@ -399,7 +411,7 @@ describe('privileged kind enforcement', () => {
         payload: { confirmation: 'delete' }, // lowercase
       },
       uiSender,
-      handlers({ 'vault.reset': reset as unknown as HandlerMap['vault.reset'] }),
+      handlers({ 'vault.reset': reset as unknown as HandlerMap['vault.reset'] })
     );
 
     expect(response.ok).toBe(false);
@@ -417,7 +429,7 @@ describe('privileged kind enforcement', () => {
         payload: { strength: 192 },
       },
       uiSender,
-      handlers(),
+      handlers()
     );
 
     expect(response.ok).toBe(false);
@@ -437,7 +449,7 @@ describe('privileged kind enforcement', () => {
         payload: { chain: 'evm', index: 0 },
       },
       pageSender,
-      handlers({ 'account.exportKey': exportKey as unknown as HandlerMap['account.exportKey'] }),
+      handlers({ 'account.exportKey': exportKey as unknown as HandlerMap['account.exportKey'] })
     );
 
     expect(response.ok).toBe(false);
@@ -456,7 +468,7 @@ describe('privileged kind enforcement', () => {
         payload: { chain: 'evm', index: 0 },
       },
       uiSender,
-      handlers(),
+      handlers()
     );
 
     expect(response.ok).toBe(false);
@@ -475,7 +487,7 @@ describe('privileged kind enforcement', () => {
         payload: { origin: 'https://evil.example', addresses: ['0xabc'] },
       },
       pageSender,
-      handlers({ 'permissions.grant': grant as unknown as HandlerMap['permissions.grant'] }),
+      handlers({ 'permissions.grant': grant as unknown as HandlerMap['permissions.grant'] })
     );
 
     expect(response.ok).toBe(false);
@@ -496,7 +508,9 @@ describe('privileged kind enforcement', () => {
         payload: { origin: 'https://evil.example', addresses: ['0xabc'], action: 'approve' },
       },
       pageSender,
-      handlers({ 'permissions.connection': resolve as unknown as HandlerMap['permissions.connection'] }),
+      handlers({
+        'permissions.connection': resolve as unknown as HandlerMap['permissions.connection'],
+      })
     );
 
     expect(response.ok).toBe(false);
@@ -510,7 +524,7 @@ describe('privileged kind enforcement', () => {
     const response = await dispatch(
       { id: newId(), v: 1, source: 'content', kind: 'permissions.pending', payload: {} },
       pageSender,
-      handlers(),
+      handlers()
     );
 
     expect(response.ok).toBe(true);
@@ -528,7 +542,7 @@ describe('privileged kind enforcement', () => {
         payload: { accountIndex: 0 },
       },
       pageSender,
-      handlers({ 'accounts.list': list as unknown as HandlerMap['accounts.list'] }),
+      handlers({ 'accounts.list': list as unknown as HandlerMap['accounts.list'] })
     );
 
     expect(response.ok).toBe(false);
@@ -549,7 +563,7 @@ describe('privileged kind enforcement', () => {
         payload: { id: 'g-1', action: 'approve' },
       },
       pageSender,
-      handlers({ 'vap.grant.resolve': resolve as unknown as HandlerMap['vap.grant.resolve'] }),
+      handlers({ 'vap.grant.resolve': resolve as unknown as HandlerMap['vap.grant.resolve'] })
     );
 
     expect(response.ok).toBe(false);
@@ -583,7 +597,7 @@ describe('page origin derivation', () => {
           seen.push(ctx.pageOrigin);
           return { accounts: [] };
         },
-      }),
+      })
     );
 
     // The forged payload origin is ignored; the URL is the authority.
@@ -609,7 +623,7 @@ describe('page origin derivation', () => {
           seen.push(ctx.pageOrigin);
           return { accounts: [] };
         },
-      }),
+      })
     );
 
     expect(seen).toEqual(['chrome-extension://veilpay-test']);

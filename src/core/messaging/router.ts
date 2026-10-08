@@ -22,7 +22,7 @@ import {
  */
 export type Handler<K extends RequestKind> = (
   payload: Extract<Request, { kind: K }>['payload'],
-  ctx: { origin: string | null; pageOrigin: string | null; tabId: number | null },
+  ctx: { origin: string | null; pageOrigin: string | null; tabId: number | null }
 ) => Promise<ResponseData[K]>;
 
 export type HandlerMap = { [K in RequestKind]: Handler<K> };
@@ -102,7 +102,7 @@ function pageOriginFromSender(sender: chrome.runtime.MessageSender): string | nu
  */
 function isTrustedExtensionSurface(
   request: Request,
-  sender: chrome.runtime.MessageSender,
+  sender: chrome.runtime.MessageSender
 ): boolean {
   if (sender.tab !== undefined) return false;
 
@@ -122,7 +122,7 @@ function isTrustedExtensionSurface(
 export async function dispatch(
   raw: unknown,
   sender: chrome.runtime.MessageSender,
-  handlers: HandlerMap,
+  handlers: HandlerMap
 ): Promise<Response> {
   const parsed = Request.safeParse(raw);
 
@@ -143,7 +143,7 @@ export async function dispatch(
     return err(
       request.id,
       'ORIGIN_DENIED',
-      'That action can only be started from the Veilpay interface.',
+      'That action can only be started from the Veilpay interface.'
     );
   }
 
@@ -435,6 +435,12 @@ export async function dispatch(
           id: request.id,
           ok: true,
           data: await handlers['agent.relay.register'](request.payload, ctx),
+        };
+      case 'agent.relay.pairing-code':
+        return {
+          id: request.id,
+          ok: true,
+          data: await handlers['agent.relay.pairing-code'](request.payload, ctx),
         };
       case 'agent.disable':
         return {
