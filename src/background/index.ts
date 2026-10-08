@@ -1595,7 +1595,20 @@ const handlers: HandlerMap = {
     };
   },
 
-  'agent.relay.pairing-code': async () => {
+  /**
+   * Returns the pairing code the panel should display, healing a relay that
+   * forgot this wallet on the way.
+   *
+   * A hosted relay keeps pairing state in memory, so a restart (free-tier
+   * sleep, a deploy) silently invalidates both the stored wallet and the code
+   * the panel is showing. Before this healed, a wiped wallet made the request
+   * fail and the panel kept displaying a dead code — exactly the code the user
+   * then typed into the AI client for the relay's "does not recognize that
+   * code" rejection. `wallet_unknown` is the restart signature: re-register
+   * and answer with the fresh code. A bad secret must NOT heal — a transient
+   * credential mismatch must never silently replace a working wallet.
+   */
+  'agent.relay.pairing-code': async (payload) => {
     const config = await loadAgentBridgeConfig();
     if (config?.mode !== 'relay' || config.walletId === undefined) {
       throw new ProtocolError(
@@ -1610,21 +1623,46 @@ const handlers: HandlerMap = {
         'x-veilpay-secret': config.token,
       },
     });
-    if (!response.ok) {
-      throw new ProtocolError(
-        'BAD_REQUEST',
-        `The relay refused a pairing code (HTTP ${response.status}).`
-      );
+
+    if (response.ok) {
+      const body = (await response.json()) as unknown;
+      if (typeof body !== 'object' || body === null) {
+        throw new ProtocolError('BAD_REQUEST', 'The relay returned a malformed pairing code.');
+      }
+      const record = body as Record<string, unknown>;
+      if (typeof record.code !== 'string' || typeof record.expiresAt !== 'number') {
+        throw new ProtocolError('BAD_REQUEST', 'The relay returned an incomplete pairing code.');
+      }
+      return { pairingCode: record.code, pairingCodeExpiresAt: record.expiresAt };
     }
-    const body = (await response.json()) as unknown;
-    if (typeof body !== 'object' || body === null) {
-      throw new ProtocolError('BAD_REQUEST', 'The relay returned a malformed pairing code.');
+
+    if (response.status === 401) {
+      let forgotten = false;
+      try {
+        const error = (await response.json()) as { code?: unknown };
+        forgotten = error.code === 'wallet_unknown';
+      } catch {
+        // Older relays return no machine-readable recovery reason.
+      }
+      if (forgotten) {
+        const registration = await recoverAgentRelay({ force: payload.manual === true });
+        if (registration !== null) {
+          return {
+            pairingCode: registration.pairing.code,
+            pairingCodeExpiresAt: registration.pairing.expiresAt,
+          };
+        }
+        throw new ProtocolError(
+          'BAD_REQUEST',
+          'The relay restarted and lost this wallet. Wait a few seconds and try again, or press Connect.'
+        );
+      }
     }
-    const record = body as Record<string, unknown>;
-    if (typeof record.code !== 'string' || typeof record.expiresAt !== 'number') {
-      throw new ProtocolError('BAD_REQUEST', 'The relay returned an incomplete pairing code.');
-    }
-    return { pairingCode: record.code, pairingCodeExpiresAt: record.expiresAt };
+
+    throw new ProtocolError(
+      'BAD_REQUEST',
+      `The relay refused a pairing code (HTTP ${response.status}).`
+    );
   },
 
   'agent.disable': async () => {
@@ -2375,6 +2413,9 @@ async function registerWithRelay(baseUrl: string): Promise<{
   };
 }
 
+/** What registering with a relay hands back: identity, secret, pairing code. */
+type RelayRegistration = Awaited<ReturnType<typeof registerWithRelay>>;
+
 /**
  * Re-registers with the relay after it forgot this wallet.
  *
@@ -2384,11 +2425,19 @@ async function registerWithRelay(baseUrl: string): Promise<{
  * re-registers itself with the same relay and keeps polling. The AI client's
  * bearer tokens were dropped with the restart too, so the user still re-pairs
  * there — but with a relay that is ready to answer.
+ *
+ * Returns the fresh registration so a caller that needs the new pairing code
+ * can hand it straight back, or null when there is nothing to recover (not in
+ * relay mode), the cooldown is active, or the relay refused. Only a
+ * user-initiated request may `force` past the cooldown — background paths must
+ * stay rate-limited so a hostile relay cannot drive a re-register hot loop.
  */
-async function recoverAgentRelay(): Promise<void> {
+async function recoverAgentRelay(options: { force?: boolean } = {}): Promise<RelayRegistration | null> {
   const config = await loadAgentBridgeConfig();
-  if (config?.mode !== 'relay') return;
-  if (Date.now() - lastAgentRecoveryAt < AGENT_RECOVERY_COOLDOWN_MS) return;
+  if (config?.mode !== 'relay') return null;
+  if (options.force !== true && Date.now() - lastAgentRecoveryAt < AGENT_RECOVERY_COOLDOWN_MS) {
+    return null;
+  }
   lastAgentRecoveryAt = Date.now();
 
   try {
@@ -2402,9 +2451,11 @@ async function recoverAgentRelay(): Promise<void> {
     });
     await restartAgentBridge();
     void appendAudit('agent.recovered', { endpoint: config.baseUrl });
+    return registration;
   } catch {
     // The relay may simply be down. The poll loop is already stopped; the next
     // manual Connect restores everything.
+    return null;
   }
 }
 

@@ -190,7 +190,9 @@ export function AgentBridgeSettings() {
     setError(null);
     setBusy(true);
     try {
-      const result = await send('agent.relay.pairing-code', {});
+      // Manual: a click must always heal — if the relay restarted and dropped
+      // the wallet, the background re-registers instead of surfacing an error.
+      const result = await send('agent.relay.pairing-code', { manual: true });
       setPairingCode(result.pairingCode);
       setPairingCodeExpiresAt(result.pairingCodeExpiresAt);
       await copy(result.pairingCode);

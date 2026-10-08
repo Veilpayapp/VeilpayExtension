@@ -11,9 +11,9 @@ import { verifyPkce } from '../../../relay/oauth.mjs';
 
 const servers: { close: (cb?: () => void) => void }[] = [];
 
-async function bootRelay() {
+async function bootRelay(relay = createRelay({ longPollMs: 50 })) {
   // A short long-poll keeps the suite fast; production holds the socket open.
-  const { server, relay, port } = await startRelay(0, createRelay({ longPollMs: 50 }));
+  const { server, port } = await startRelay(0, relay);
   servers.push(server);
   return { base: `http://127.0.0.1:${port}`, relay };
 }
@@ -270,6 +270,35 @@ describe('universal connector URL', () => {
       body: new URLSearchParams({ pairing_code: 'NOPE-0000' }),
     });
     expect(response.status).toBe(400);
+    const page = await response.text();
+    // The page must name both real causes (a restart wiped the code, or the
+    // client points elsewhere) and end with the action that fixes either:
+    // re-copy whatever the extension shows now.
+    expect(page).toContain('does not recognize that code');
+    expect(page).toContain('restarted');
+    expect(page).toContain('copy the code shown now');
+  });
+
+  it('tells a slow user the code expired, distinctly from an unknown one', async () => {
+    let now = 1_000_000;
+    const relay = createRelay({ now: () => now, longPollMs: 50 });
+    const { base } = await bootRelay(relay);
+    const { pairing } = relay.registerWallet();
+    const { challenge } = pkce();
+    const client = await registerClient(base);
+    const params = authorizeParams(client.client_id, 'unused', challenge);
+    params.delete('wallet');
+
+    now += 15 * 60 * 1000 + 1;
+    const response = await fetch(`${base}/authorize/approve?${params}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ pairing_code: pairing.code }),
+    });
+    expect(response.status).toBe(400);
+    const page = await response.text();
+    expect(page).toContain('expired');
+    expect(page).toContain('copy a fresh code');
   });
 });
 

@@ -158,8 +158,11 @@ client.
    **Veilpay → Settings → Agent**, then approve the consent page. The code is
    `XXXX-XXXX`, valid for 15 minutes, and single use.
 
-If the relay restarts before the OAuth flow finishes, click **Connect** again to
-register the wallet and get a fresh code.
+If the relay restarts before the OAuth flow finishes (free-tier sleep, a deploy),
+the extension notices on its own: the next code refresh re-registers the wallet
+and the panel shows the new live code within ~10 seconds. The **Copy fresh
+code** button heals immediately. Then re-enter the code the panel shows now —
+the old one is gone for good.
 
 ### Try it
 
@@ -192,5 +195,5 @@ Fund testnet accounts from the extension's built-in faucet.
 | Status pill “Waiting for the AI client” | Paired but the bridge is unreachable: local — is `node mcp/veilpay-mcp.mjs` running? relay — is the service awake?                                                                                                                                                                                                                                                          |
 | 401 from the relay                      | The relay restarted (free tier). The extension re-registers itself within a poll and stays connected; the AI client's token was dropped with the restart, so re-pair there with a fresh code.                                                                                                                                                                               |
 | Connector creation fails in ChatGPT     | The URL must be public `https://`; check with the smoke script. Also verify your plan allows custom connectors.                                                                                                                                                                                                                                                             |
-| Pairing code is invalid or expired      | Codes are single-use and valid for 15 minutes. The panel always shows the relay's current code — it refreshes automatically after expiry or a relay restart; re-copy and re-enter. "Not recognized" means the code never existed on that relay: either the relay restarted mid-pairing, or the AI client points at a different relay than the extension — compare the URLs. |
+| Pairing code is invalid or expired      | Codes are single-use and valid for 15 minutes. The panel always shows the relay's current code — it refreshes automatically after expiry or a relay restart, and a refresh re-registers the wallet if the restart wiped it, so re-copy and re-enter what the panel shows **now**. "Not recognized" on the pairing page means the code you typed is not the live one: either the relay restarted mid-pairing (re-copy — the extension has already healed), or the AI client points at a different relay than the extension — compare the URLs. |
 | First request after idle is slow        | Free-plan cold start (~30–60 s). It succeeds on retry.                                                                                                                                                                                                                                                                                                                      |

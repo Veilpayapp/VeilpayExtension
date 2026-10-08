@@ -313,25 +313,30 @@ export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}
       // human just typed is what binds this authorization to their wallet.
       let pairingWalletId = null;
       if (oauth.walletFromAuthorize(params) === null) {
-        const resolved = resolvePairingCode(params.pairing_code);
-        if (resolved === null) {
+        // One lookup decides both whether the code may authorize and which
+        // error to show. Resolving first and asking the status again afterwards
+        // would always report "unknown": the first call sweeps expired codes
+        // out of the map, so the second call cannot see the entry anymore.
+        const status = pairingCodeStatus(params.pairing_code);
+        if (status.status !== 'valid') {
           // Saying *why* the code failed is the difference between a user who
           // retries successfully and one who gives up: expired means be quicker
-          // with a fresh code; unknown almost always means the AI client points
-          // at a different relay than the extension is paired with.
-          const status = pairingCodeStatus(params.pairing_code);
+          // with a fresh code; unknown means either the relay restarted and lost
+          // it (the usual free-tier case — the extension re-registers on its
+          // own, so the code it shows *now* is the live one) or the AI client
+          // points at a different relay than the extension is paired with.
           html(
             response,
             400,
             errorPage(
               status.status === 'expired'
                 ? 'That pairing code expired. Open Veilpay → Settings → Agent, copy a fresh code, and enter it right away.'
-                : `This relay (${origin}) does not recognize that code. The AI client must use the same relay the extension shows in Settings → Agent.`
+                : `This relay (${origin}) does not recognize that code. Either it restarted and lost it, or the AI client is using a different relay than the extension shows in Settings → Agent. Open Veilpay → Settings → Agent, copy the code shown now, and enter it right away.`
             )
           );
           return;
         }
-        pairingWalletId = resolved.walletId;
+        pairingWalletId = status.walletId;
         params.wallet = pairingWalletId;
       }
       const result = oauth.authorize(params);

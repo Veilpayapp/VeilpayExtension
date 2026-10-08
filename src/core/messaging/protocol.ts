@@ -818,7 +818,12 @@ export const AgentRelayRegisterRequest = baseEnvelope.extend({
 
 export const AgentRelayPairingCodeRequest = baseEnvelope.extend({
   kind: z.literal('agent.relay.pairing-code'),
-  payload: z.object({}),
+  payload: z.object({
+    /** True when a human asked for the code (button click) rather than the
+     * panel's automatic refresh: a manual ask may bypass the self-recovery
+     * cooldown, so the click always heals a relay that restarted. */
+    manual: z.boolean().optional(),
+  }),
 });
 
 export const AgentDisableRequest = baseEnvelope.extend({

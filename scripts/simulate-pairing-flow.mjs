@@ -7,6 +7,9 @@
  *     (mirrors src/background/agent-bridge.ts + index.ts logic)
  *   - the AI client: dynamic registration, GET /authorize, POST /authorize/approve
  *     with the pairing code, token exchange, /mcp call
+ *   - the fixed panel: a pairing-code request after a restart heals the wiped
+ *     wallet and returns the fresh code (mirrors the agent.relay.pairing-code
+ *     handler in src/background/index.ts)
  *
  * Run: node scripts/simulate-pairing-flow.mjs
  */
@@ -74,6 +77,35 @@ async function recoverWallet(wallet) {
   const fresh = await extensionRegister();
   Object.assign(wallet, fresh);
   return fresh;
+}
+
+/**
+ * The panel asking for the code to display, as the FIXED
+ * 'agent.relay.pairing-code' handler performs it: a wallet the relay forgot
+ * (401 wallet_unknown) triggers re-registration, and the fresh code is what
+ * the panel shows. `manual` mirrors the button click bypassing the recovery
+ * cooldown; the automatic refresh passes nothing and respects it.
+ */
+async function panelPairingCode(wallet, { manual = false } = {}) {
+  const response = await fetch(`${BASE}/wallet/pairing-code`, {
+    method: 'POST',
+    headers: { 'x-veilpay-wallet': wallet.walletId, 'x-veilpay-secret': wallet.secret },
+  });
+  if (response.ok) {
+    const body = await response.json();
+    return { code: body.code, expiresAt: body.expiresAt, healed: false };
+  }
+  if (response.status === 401) {
+    const error = await response.json().catch(() => ({}));
+    if (error.code === 'wallet_unknown') {
+      // In the real handler, `manual` only decides whether this may bypass the
+      // recovery cooldown; the healing action itself is identical.
+      const fresh = manual === false ? await recoverWallet(wallet) : await extensionRegister();
+      if (manual === true) Object.assign(wallet, fresh);
+      return { code: fresh.code, expiresAt: fresh.expiresAt, healed: true };
+    }
+  }
+  return null;
 }
 
 /** The AI client's OAuth + pairing, as the browser does it. */
@@ -169,9 +201,55 @@ try {
   await stopRelay(relay);
 }
 
+console.info('\n== phase 3: the panel asks for a code after a restart (the fix) ==');
+relay = await startRelay();
+try {
+  const wallet = await extensionRegister();
+  const deadCode = wallet.code;
+  console.info(`  extension registered, code ${deadCode}`);
+  // The relay restarts again — same wipe as before.
+  await stopRelay(relay);
+  relay = await startRelay();
+
+  // The panel's code request now self-heals instead of failing: the background
+  // sees wallet_unknown, re-registers, and answers with the fresh code. That
+  // code is what the panel displays — so it is what the user would type.
+  const shown = await panelPairingCode(wallet);
+  check(
+    'panel code request heals a wiped wallet',
+    shown !== null && shown.healed === true && shown.code !== deadCode,
+    shown === null ? 'request failed' : `code ${shown.code}`
+  );
+
+  // The healed wallet keeps polling cleanly, and a later refresh returns the
+  // same live code — no rotation while it is unconsumed and the user may be
+  // typing it. (Pairing consumes a code, so this must run before the pairing.)
+  const again = await pollOnce(wallet);
+  check('healed wallet polls cleanly', again.connected === true);
+  const redisplayed = await panelPairingCode(wallet);
+  check(
+    'a repeat request returns the same live code',
+    redisplayed !== null && redisplayed.healed === false && redisplayed.code === shown.code,
+    redisplayed === null ? 'request failed' : `code ${redisplayed.code}`
+  );
+
+  // The code the panel would now show authorizes — the user's exact flow,
+  // retried after the restart, succeeds. This consumes the code.
+  const retried = await clientPairWithCode(shown.code);
+  check(
+    'the code the panel now shows authorizes',
+    retried.approval.status === 302,
+    `status ${retried.approval.status} body ${retried.approvalBody.slice(0, 120)}`
+  );
+} finally {
+  await stopRelay(relay);
+}
+
 console.info('');
 if (failures === 0) {
-  console.info('Simulation complete: the failure is reproduced and the recovery path works.');
+  console.info(
+    'Simulation complete: the failure is reproduced, the poller recovery works, and a panel code request after a restart now heals and returns the live code.'
+  );
   process.exit(0);
 }
 console.error(`${failures} check(s) failed.`);
