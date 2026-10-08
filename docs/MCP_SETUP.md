@@ -186,11 +186,11 @@ Fund testnet accounts from the extension's built-in faucet.
 
 ## Troubleshooting
 
-| Symptom                                 | Meaning                                                                                                                |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `wallet_status` errors                  | Extension closed or locked. Open Veilpay, unlock, retry.                                                               |
-| Status pill “Waiting for the AI client” | Paired but the bridge is unreachable: local — is `node mcp/veilpay-mcp.mjs` running? relay — is the service awake?     |
-| 401 from the relay                      | Token no longer matches (relay restarted, or disconnected) — re-connect from Settings → Agent.                         |
-| Connector creation fails in ChatGPT     | The URL must be public `https://`; check with the smoke script. Also verify your plan allows custom connectors.        |
-| Pairing code is invalid or expired      | Codes are single-use and valid for 10 minutes. Open Settings → Agent, connect again if needed, and enter a fresh code. |
-| First request after idle is slow        | Free-plan cold start (~30–60 s). It succeeds on retry.                                                                 |
+| Symptom                                 | Meaning                                                                                                                                                                                       |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `wallet_status` errors                  | Extension closed or locked. Open Veilpay, unlock, retry.                                                                                                                                      |
+| Status pill “Waiting for the AI client” | Paired but the bridge is unreachable: local — is `node mcp/veilpay-mcp.mjs` running? relay — is the service awake?                                                                            |
+| 401 from the relay                      | The relay restarted (free tier). The extension re-registers itself within a poll and stays connected; the AI client's token was dropped with the restart, so re-pair there with a fresh code. |
+| Connector creation fails in ChatGPT     | The URL must be public `https://`; check with the smoke script. Also verify your plan allows custom connectors.                                                                               |
+| Pairing code is invalid or expired      | Codes are single-use and valid for 10 minutes. Open Settings → Agent, connect again if needed, and enter a fresh code.                                                                        |
+| First request after idle is slow        | Free-plan cold start (~30–60 s). It succeeds on retry.                                                                                                                                        |

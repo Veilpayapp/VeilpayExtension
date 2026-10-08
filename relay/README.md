@@ -51,8 +51,11 @@ TLS is not optional — MCP clients only connect to `https://`, and a bearer tok
 over plaintext is a credential in the clear.
 
 No persistent state: wallets and pairings live in memory. A restart drops
-pairings, and users re-connect from the extension. Add a store before running
-this for real.
+pairings, and users re-connect from the extension — one click. Extension polls
+that arrive with a wallet the relay no longer knows get a 401 with
+code `wallet_unknown`, which the extension uses to re-register itself and keep
+polling; a plain bad secret stays a 401 so it never triggers that. Add a store
+before running this for real.
 
 ## Endpoints
 
@@ -89,7 +92,9 @@ What is enforced here: PKCE S256 on every exchange, single-use authorization
 codes, registered-redirect validation (no open redirect), constant-time secret
 comparison, and a strict CSP on the consent page. Pairing codes are 10-minute,
 single-use Crockford-base32 codes with 40 bits of entropy; guessing is bounded by
-the short TTL and single-use consumption.
+the short TTL and single-use consumption. A pairing code is burned only when an
+authorization actually succeeds — a malformed OAuth request leaves it usable, so
+an AI client's discovery retries cannot lock the user out.
 
 ## The honest gap to retail
 

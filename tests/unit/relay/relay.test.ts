@@ -217,6 +217,30 @@ describe('universal connector URL', () => {
     expect(listed.result.tools).toHaveLength(6);
   });
 
+  it('does not burn a valid pairing code when OAuth validation fails', async () => {
+    const { base, relay } = await bootRelay();
+    const { pairing, walletId } = relay.registerWallet();
+    const client = await registerClient(base);
+    const params = new URLSearchParams({
+      client_id: client.client_id,
+      redirect_uri: 'https://client.example/callback',
+      response_type: 'code',
+      // Deliberately omit code_challenge: the client can retry with the same
+      // pairing code after it completes its PKCE setup.
+    });
+    params.delete('wallet');
+
+    const invalid = await fetch(`${base}/authorize/approve?${params}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ pairing_code: pairing.code }),
+    });
+    expect(invalid.status).toBe(400);
+
+    const resolved = relay.resolvePairingCode(pairing.code);
+    expect(resolved?.walletId).toBe(walletId);
+  });
+
   it('rejects an invalid pairing code without a wallet parameter', async () => {
     const { base } = await bootRelay();
     const { challenge } = pkce();

@@ -95,7 +95,6 @@ export async function clearAgentBridgeConfig(): Promise<void> {
   await chrome.storage.local.remove(STORAGE_KEY);
 }
 
-
 export interface BridgeRequest {
   id: string;
   tool: string;
@@ -107,14 +106,23 @@ export interface BridgeRequest {
  *
  * Returns whether a request was handled, plus the connection state, so the
  * caller can drive backoff and status reporting without inspecting the network
- * itself.
+ * itself. `unauthorized` marks a 401: the bridge no longer knows this wallet,
+ * which for a hosted relay means it restarted and dropped its in-memory
+ * pairings — the caller can re-register rather than retry a dead credential.
  */
+export interface PollOutcome {
+  connected: boolean;
+  handled: boolean;
+  /** True only for a 401 poll: the stored wallet credentials were refused. */
+  unauthorized: boolean;
+}
+
 export async function pollOnce(
   config: AgentBridgeConfig,
   execute: (request: BridgeRequest) => Promise<unknown>,
   fetchImpl: typeof fetch = fetch,
-  signal?: AbortSignal,
-): Promise<{ connected: boolean; handled: boolean }> {
+  signal?: AbortSignal
+): Promise<PollOutcome> {
   let response: Response;
   try {
     response = await fetchImpl(`${config.baseUrl}/next`, {
@@ -123,36 +131,50 @@ export async function pollOnce(
     });
   } catch {
     // Bridge not running, or the service worker is shutting down.
-    return { connected: false, handled: false };
+    return { connected: false, handled: false, unauthorized: false };
   }
 
   if (response.status === 204) {
     // Long-poll elapsed with no work: the server is healthy and idle.
-    return { connected: true, handled: false };
+    return { connected: true, handled: false, unauthorized: false };
   }
   if (!response.ok) {
-    // 401 means the token no longer matches — surface as disconnected so the
-    // UI can tell the user to re-pair rather than silently retrying forever.
-    return { connected: false, handled: false };
+    // The server distinguishes an unknown wallet (volatile state was lost)
+    // from a bad secret (credential mismatch). Only the first is safe to
+    // recover automatically: re-registering on a bad-secret 401 would revoke
+    // valid OAuth grants unnecessarily.
+    let unauthorized = false;
+    if (response.status === 401 && config.mode === 'relay') {
+      try {
+        const error = (await response.json()) as { code?: unknown };
+        unauthorized = error.code === 'wallet_unknown';
+      } catch {
+        // Older relay versions return no machine-readable recovery reason.
+      }
+    }
+    return { connected: false, handled: false, unauthorized };
   }
 
   let request: BridgeRequest;
   try {
     const parsed = (await response.json()) as unknown;
-    if (typeof parsed !== 'object' || parsed === null) return { connected: true, handled: false };
+    if (typeof parsed !== 'object' || parsed === null) {
+      return { connected: true, handled: false, unauthorized: false };
+    }
     const record = parsed as Record<string, unknown>;
     if (typeof record.id !== 'string' || typeof record.tool !== 'string') {
-      return { connected: true, handled: false };
+      return { connected: true, handled: false, unauthorized: false };
     }
     request = {
       id: record.id,
       tool: record.tool,
-      args: typeof record.args === 'object' && record.args !== null
-        ? (record.args as Record<string, unknown>)
-        : {},
+      args:
+        typeof record.args === 'object' && record.args !== null
+          ? (record.args as Record<string, unknown>)
+          : {},
     };
   } catch {
-    return { connected: true, handled: false };
+    return { connected: true, handled: false, unauthorized: false };
   }
 
   let payload: { id: string; ok: boolean; data?: unknown; error?: { message: string } };
@@ -162,7 +184,8 @@ export async function pollOnce(
   } catch (cause) {
     // A tool failure is a normal outcome (cap exceeded, user denied), so it is
     // reported to the agent rather than thrown into the poll loop.
-    const message = cause instanceof Error ? cause.message : 'The wallet could not complete that request.';
+    const message =
+      cause instanceof Error ? cause.message : 'The wallet could not complete that request.';
     payload = { id: request.id, ok: false, error: { message } };
   }
 
@@ -180,7 +203,7 @@ export async function pollOnce(
     // The agent will have timed out on its side; nothing more to do.
   }
 
-  return { connected: true, handled: true };
+  return { connected: true, handled: true, unauthorized: false };
 }
 
 export interface AgentBridgeLoop {
@@ -198,11 +221,17 @@ export interface AgentBridgeLoop {
  * and the vault still enforces its own idle deadline regardless. The cost is
  * that the worker stays warm while the bridge is enabled — the reason this is
  * opt-in rather than always-on.
+ *
+ * When a poll is refused with 401 the relay has forgotten this wallet (a hosted
+ * relay restarts and drops its in-memory state). The loop stops and hands the
+ * problem to `onUnauthorized`, whose job is to re-register and start a fresh
+ * loop — never to keep polling dead credentials.
  */
 export function startAgentBridgeLoop(
   config: AgentBridgeConfig,
   execute: (request: BridgeRequest) => Promise<unknown>,
   fetchImpl: typeof fetch = fetch,
+  options: { onUnauthorized?: () => void } = {}
 ): AgentBridgeLoop {
   let running = true;
   let isConnected = false;
@@ -224,6 +253,13 @@ export function startAgentBridgeLoop(
       if (!running) break;
       isConnected = outcome.connected;
       if (outcome.connected) lastPoll = Date.now();
+      if (outcome.unauthorized) {
+        // The relay dropped this wallet. Stop polling with the dead credential;
+        // the caller re-registers and replaces this loop with a live one.
+        isConnected = false;
+        options.onUnauthorized?.();
+        break;
+      }
       // A healthy long-poll returns immediately after 204; only back off when
       // the bridge looks unreachable, so a live bridge adds no latency.
       if (!outcome.connected) await sleep(RETRY_DELAY_MS);

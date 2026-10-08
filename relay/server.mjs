@@ -136,20 +136,27 @@ export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}
     return { code: formatPairingCode(key), expiresAt };
   }
 
-  /**
-   * Single use: the code is burned whether it was valid, expired, or never
-   * existed. An expired code is consumed but resolves to no wallet.
-   */
-  function consumePairingCode(input) {
+  /** Looks up a live code without consuming it. */
+  function resolvePairingCode(input) {
     sweep();
     const code = normalizePairingCode(input);
     const entry = pairingCodes.get(code);
-    pairingCodes.delete(code);
-    if (entry === undefined) return null;
-    if (walletPairingCode.get(entry.walletId) === code) {
-      walletPairingCode.delete(entry.walletId);
+    if (entry === undefined || entry.expiresAt < now()) return null;
+    return { key: code, walletId: entry.walletId };
+  }
+
+  /**
+   * Single use: a successful authorization burns the code. An expired or
+   * unknown code resolves to null and is not allowed to identify a wallet.
+   */
+  function consumePairingCode(input) {
+    const resolved = resolvePairingCode(input);
+    if (resolved === null) return null;
+    pairingCodes.delete(resolved.key);
+    if (walletPairingCode.get(resolved.walletId) === resolved.key) {
+      walletPairingCode.delete(resolved.walletId);
     }
-    return entry.expiresAt >= now() ? entry.walletId : null;
+    return resolved.walletId;
   }
 
   /** Registers a wallet for the extension. The secret never leaves that pair. */
@@ -174,6 +181,21 @@ export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}
     const wallet = wallets.get(walletId);
     if (wallet === undefined) return null;
     return tokenMatches(wallet.secret, secret) ? wallet : null;
+  }
+
+  /**
+   * Distinguishes the two 401 causes so the extension can recover safely: only
+   * a wallet the relay no longer knows (in-memory state lost to a restart) may
+   * be re-registered automatically. A bad secret must NOT trigger that, or a
+   * transient credential mismatch would silently replace a working wallet and
+   * drop every AI client's grant.
+   */
+  function unknownWalletResponse(walletId) {
+    const code =
+      typeof walletId === 'string' && walletId.length > 0 && !wallets.has(walletId)
+        ? 'wallet_unknown'
+        : 'bad_secret';
+    return { ok: false, error: 'Unknown wallet or bad secret.', code };
   }
 
   function base(request) {
@@ -204,7 +226,7 @@ export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}
     if (path === '/next' || path === '/result') {
       const wallet = authenticateWallet(request.headers);
       if (wallet === null) {
-        json(response, 401, { ok: false, error: 'Unknown wallet or bad secret.' });
+        json(response, 401, unknownWalletResponse(request.headers['x-veilpay-wallet']));
         return;
       }
       if (path === '/next') {
@@ -228,7 +250,7 @@ export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}
     if (request.method === 'POST' && path === '/wallet/pairing-code') {
       const walletId = request.headers['x-veilpay-wallet'];
       if (typeof walletId !== 'string' || authenticateWallet(request.headers) === null) {
-        json(response, 401, { ok: false, error: 'Unknown wallet or bad secret.' });
+        json(response, 401, unknownWalletResponse(walletId));
         return;
       }
       json(response, 200, { ok: true, ...issuePairingCode(walletId) });
@@ -279,9 +301,10 @@ export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}
       const params = { ...Object.fromEntries(url.searchParams), ...form };
       // The universal connector URL carries no wallet, so the pairing code the
       // human just typed is what binds this authorization to their wallet.
+      let pairingWalletId = null;
       if (oauth.walletFromAuthorize(params) === null) {
-        const walletId = consumePairingCode(params.pairing_code);
-        if (walletId === null) {
+        const resolved = resolvePairingCode(params.pairing_code);
+        if (resolved === null) {
           html(
             response,
             400,
@@ -291,11 +314,25 @@ export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}
           );
           return;
         }
-        params.wallet = walletId;
+        pairingWalletId = resolved.walletId;
+        params.wallet = pairingWalletId;
       }
       const result = oauth.authorize(params);
       if (!result.ok) {
+        // Do not burn a valid pairing code when the AI client's OAuth request
+        // itself is malformed. Clients commonly retry discovery with a slightly
+        // different parameter set before settling on their final request.
         html(response, 400, errorPage(result.error));
+        return;
+      }
+      if (pairingWalletId !== null && consumePairingCode(params.pairing_code) !== pairingWalletId) {
+        html(
+          response,
+          409,
+          errorPage(
+            'That pairing code was already used. Open Veilpay → Settings → Agent for a fresh code.'
+          )
+        );
         return;
       }
       response.writeHead(302, { location: result.redirectTo }).end();
@@ -367,6 +404,7 @@ export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}
     oauth,
     stop,
     issuePairingCode,
+    resolvePairingCode,
     consumePairingCode,
     walletCount: () => wallets.size,
   };

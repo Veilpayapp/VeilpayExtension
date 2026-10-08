@@ -35,6 +35,8 @@ export interface Relay {
   oauth: OAuth;
   stop(): void;
   issuePairingCode(walletId: string): PairingGrant;
+  /** Resolves a live code without consuming it. */
+  resolvePairingCode(input: unknown): { key: string; walletId: string } | null;
   consumePairingCode(input: unknown): string | null;
   walletCount(): number;
 }

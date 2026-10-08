@@ -1572,59 +1572,26 @@ const handlers: HandlerMap = {
    */
   'agent.relay.register': async (payload) => {
     const baseUrl = payload.baseUrl.replace(/\/$/, '');
-    let response: Response;
-    try {
-      response = await fetch(`${baseUrl}/wallet/register`, { method: 'POST' });
-    } catch {
-      throw new ProtocolError('BAD_REQUEST', `Could not reach the relay at ${baseUrl}.`);
-    }
-    if (!response.ok) {
-      throw new ProtocolError(
-        'BAD_REQUEST',
-        `The relay refused registration (HTTP ${response.status}).`
-      );
-    }
-
-    const body = (await response.json()) as unknown;
-    if (typeof body !== 'object' || body === null) {
-      throw new ProtocolError('BAD_REQUEST', 'The relay returned a malformed registration.');
-    }
-    const record = body as Record<string, unknown>;
-    const { walletId, secret } = record;
-    if (typeof walletId !== 'string' || typeof secret !== 'string') {
-      throw new ProtocolError('BAD_REQUEST', 'The relay returned an incomplete registration.');
-    }
+    const registration = await registerWithRelay(baseUrl);
 
     await saveAgentBridgeConfig({
       mode: 'relay',
       baseUrl,
-      token: secret,
-      walletId,
+      token: registration.secret,
+      walletId: registration.walletId,
       pairedAt: Date.now(),
     });
     await restartAgentBridge();
     void appendAudit('agent.paired', { mode: 'relay', endpoint: baseUrl });
 
-    // The wallet id rides in the path, so the URL the user pastes carries its own
-    // identity and the client's OAuth discovery does the rest — nothing to type.
     // The URL is universal — the same for every user — so the pairing code is
     // what binds an AI client's OAuth grant to this wallet when the user enters
     // it on the relay's consent page.
-    const pairing = record.pairing;
-    if (
-      typeof pairing !== 'object' ||
-      pairing === null ||
-      typeof (pairing as Record<string, unknown>).code !== 'string' ||
-      typeof (pairing as Record<string, unknown>).expiresAt !== 'number'
-    ) {
-      throw new ProtocolError('BAD_REQUEST', 'The relay returned an incomplete pairing code.');
-    }
-
     return {
       mcpUrl: `${baseUrl}/mcp`,
-      walletId,
-      pairingCode: (pairing as Record<string, unknown>).code as string,
-      pairingCodeExpiresAt: (pairing as Record<string, unknown>).expiresAt as number,
+      walletId: registration.walletId,
+      pairingCode: registration.pairing.code,
+      pairingCodeExpiresAt: registration.pairing.expiresAt,
     };
   },
 
@@ -2326,6 +2293,11 @@ const AGENT_CLIENT_ID = 'mcp:veilpay';
 
 let agentLoop: AgentBridgeLoop | null = null;
 
+/** Cooldown for relay self-recovery, so a hostile or broken relay cannot make
+ * the background re-register in a hot loop. */
+const AGENT_RECOVERY_COOLDOWN_MS = 30_000;
+let lastAgentRecoveryAt = 0;
+
 function stopAgentBridge(): void {
   agentLoop?.stop();
   agentLoop = null;
@@ -2348,9 +2320,92 @@ async function restartAgentBridge(): Promise<void> {
   stopAgentBridge();
   const config = await loadAgentBridgeConfig();
   if (config === null) return;
-  agentLoop = startAgentBridgeLoop(config, (request) =>
-    executeAgentTool(request.tool, request.args)
+  agentLoop = startAgentBridgeLoop(
+    config,
+    (request) => executeAgentTool(request.tool, request.args),
+    fetch,
+    { onUnauthorized: () => void recoverAgentRelay() }
   );
+}
+
+/** Registers a fresh wallet entry with a relay. Shared by the pairing flow and
+ * self-recovery, so both produce the same validated shape. */
+async function registerWithRelay(baseUrl: string): Promise<{
+  walletId: string;
+  secret: string;
+  pairing: { code: string; expiresAt: number };
+}> {
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/wallet/register`, { method: 'POST' });
+  } catch {
+    throw new ProtocolError('BAD_REQUEST', `Could not reach the relay at ${baseUrl}.`);
+  }
+  if (!response.ok) {
+    throw new ProtocolError(
+      'BAD_REQUEST',
+      `The relay refused registration (HTTP ${response.status}).`
+    );
+  }
+
+  const body = (await response.json()) as unknown;
+  if (typeof body !== 'object' || body === null) {
+    throw new ProtocolError('BAD_REQUEST', 'The relay returned a malformed registration.');
+  }
+  const record = body as Record<string, unknown>;
+  const { walletId, secret } = record;
+  const pairing = record.pairing;
+  if (
+    typeof walletId !== 'string' ||
+    typeof secret !== 'string' ||
+    typeof pairing !== 'object' ||
+    pairing === null ||
+    typeof (pairing as Record<string, unknown>).code !== 'string' ||
+    typeof (pairing as Record<string, unknown>).expiresAt !== 'number'
+  ) {
+    throw new ProtocolError('BAD_REQUEST', 'The relay returned an incomplete registration.');
+  }
+  return {
+    walletId,
+    secret,
+    pairing: {
+      code: (pairing as Record<string, unknown>).code as string,
+      expiresAt: (pairing as Record<string, unknown>).expiresAt as number,
+    },
+  };
+}
+
+/**
+ * Re-registers with the relay after it forgot this wallet.
+ *
+ * A hosted relay keeps wallets in memory, so a free-tier restart drops the
+ * pairing: polls answer 401 and every later pairing-code request would fail.
+ * Rather than making the user notice and re-pair by hand, the bridge
+ * re-registers itself with the same relay and keeps polling. The AI client's
+ * bearer tokens were dropped with the restart too, so the user still re-pairs
+ * there — but with a relay that is ready to answer.
+ */
+async function recoverAgentRelay(): Promise<void> {
+  const config = await loadAgentBridgeConfig();
+  if (config?.mode !== 'relay') return;
+  if (Date.now() - lastAgentRecoveryAt < AGENT_RECOVERY_COOLDOWN_MS) return;
+  lastAgentRecoveryAt = Date.now();
+
+  try {
+    const registration = await registerWithRelay(config.baseUrl);
+    await saveAgentBridgeConfig({
+      mode: 'relay',
+      baseUrl: config.baseUrl,
+      token: registration.secret,
+      walletId: registration.walletId,
+      pairedAt: Date.now(),
+    });
+    await restartAgentBridge();
+    void appendAudit('agent.recovered', { endpoint: config.baseUrl });
+  } catch {
+    // The relay may simply be down. The poll loop is already stopped; the next
+    // manual Connect restores everything.
+  }
 }
 
 function asChain(value: unknown): ChainId {
