@@ -38,7 +38,7 @@ export const DEFAULT_PORT = 8788;
 export const WALLET_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 
 /** How long a pairing code remains valid. */
-export const PAIRING_TTL_MS = 10 * 60 * 1000;
+export const PAIRING_TTL_MS = 15 * 60 * 1000;
 
 /**
  * Crockford base32: no I, L, O, U — the characters people misread and mistype.
@@ -136,13 +136,23 @@ export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}
     return { code: formatPairingCode(key), expiresAt };
   }
 
-  /** Looks up a live code without consuming it. */
-  function resolvePairingCode(input) {
-    sweep();
+  /** Looks up a code without consuming it, distinguishing why it is unusable. */
+  function pairingCodeStatus(input) {
+    // The entry is captured before sweeping because sweep deletes expired
+    // codes, and "expired" is exactly what the caller needs to distinguish
+    // from "this relay never issued it".
     const code = normalizePairingCode(input);
     const entry = pairingCodes.get(code);
-    if (entry === undefined || entry.expiresAt < now()) return null;
-    return { key: code, walletId: entry.walletId };
+    sweep();
+    if (entry === undefined) return { status: 'unknown' };
+    if (entry.expiresAt < now()) return { status: 'expired' };
+    return { status: 'valid', key: code, walletId: entry.walletId };
+  }
+
+  /** Looks up a live code without consuming it. */
+  function resolvePairingCode(input) {
+    const resolved = pairingCodeStatus(input);
+    return resolved.status === 'valid' ? resolved : null;
   }
 
   /**
@@ -305,11 +315,18 @@ export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}
       if (oauth.walletFromAuthorize(params) === null) {
         const resolved = resolvePairingCode(params.pairing_code);
         if (resolved === null) {
+          // Saying *why* the code failed is the difference between a user who
+          // retries successfully and one who gives up: expired means be quicker
+          // with a fresh code; unknown almost always means the AI client points
+          // at a different relay than the extension is paired with.
+          const status = pairingCodeStatus(params.pairing_code);
           html(
             response,
             400,
             errorPage(
-              'That pairing code is not valid or has expired. Open Veilpay → Settings → Agent for a fresh code.'
+              status.status === 'expired'
+                ? 'That pairing code expired. Open Veilpay → Settings → Agent, copy a fresh code, and enter it right away.'
+                : `This relay (${origin}) does not recognize that code. The AI client must use the same relay the extension shows in Settings → Agent.`
             )
           );
           return;
@@ -405,6 +422,7 @@ export function createRelay({ now = () => Date.now(), baseUrl, longPollMs } = {}
     stop,
     issuePairingCode,
     resolvePairingCode,
+    pairingCodeStatus,
     consumePairingCode,
     walletCount: () => wallets.size,
   };

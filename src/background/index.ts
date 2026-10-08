@@ -2687,6 +2687,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 console.info('[veilpay] service worker ready, message listener registered');
 
 /**
+ * Resume the agent-bridge poll loop on every service-worker wake.
+ *
+ * MV3 kills service workers mid-session all the time, and `onInstalled` /
+ * `onStartup` do not fire on those revivals — only this module evaluation does.
+ * Without this, a killed worker meant a dead poller, an idle hosted relay
+ * (free tiers sleep after ~15 minutes), and a restart that wiped the wallet and
+ * its pairing code out of memory. Starting here on every wake is what keeps the
+ * relay continuously polled and the pairing alive; it is idempotent because
+ * `restartAgentBridge` replaces any loop it finds.
+ */
+void restartAgentBridge();
+
+/**
  * Idle relock.
  *
  * A `setTimeout` would die with the worker, so the check is driven by an alarm.

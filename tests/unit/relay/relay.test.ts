@@ -86,11 +86,27 @@ describe('pairing codes', () => {
     const first = relay.issuePairingCode(walletId);
     expect(relay.issuePairingCode(walletId)).toEqual(first);
 
-    now += 10 * 60 * 1000 + 1;
+    now += 15 * 60 * 1000 + 1;
     const second = relay.issuePairingCode(walletId);
     expect(second.code).not.toBe(first.code);
     // Expiry must invalidate the code that was displayed before the refresh.
     expect(relay.consumePairingCode(first.code)).toBeNull();
+    relay.stop();
+  });
+
+  it('distinguishes an expired code from one this relay never issued', () => {
+    let now = 1_000_000;
+    const relay = createRelay({ now: () => now });
+    const { walletId } = relay.registerWallet();
+    const { code } = relay.issuePairingCode(walletId);
+
+    expect(relay.pairingCodeStatus(code)).toMatchObject({ status: 'valid', walletId });
+    expect(relay.pairingCodeStatus('NEVR-1SSU')).toMatchObject({ status: 'unknown' });
+
+    now += 15 * 60 * 1000 + 1;
+    // "Expired" and "unknown" must stay distinguishable: the error page uses
+    // them to tell a slow user apart from a client pointed at the wrong relay.
+    expect(relay.pairingCodeStatus(code)).toMatchObject({ status: 'expired' });
     relay.stop();
   });
 

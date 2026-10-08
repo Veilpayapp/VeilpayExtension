@@ -156,7 +156,7 @@ client.
    limitation, not a relay error.)
 3. When the AI client opens the relay's pairing page, enter or paste the code from
    **Veilpay → Settings → Agent**, then approve the consent page. The code is
-   `XXXX-XXXX`, valid for 10 minutes, and single use.
+   `XXXX-XXXX`, valid for 15 minutes, and single use.
 
 If the relay restarts before the OAuth flow finishes, click **Connect** again to
 register the wallet and get a fresh code.
@@ -186,11 +186,11 @@ Fund testnet accounts from the extension's built-in faucet.
 
 ## Troubleshooting
 
-| Symptom                                 | Meaning                                                                                                                                                                                       |
-| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `wallet_status` errors                  | Extension closed or locked. Open Veilpay, unlock, retry.                                                                                                                                      |
-| Status pill “Waiting for the AI client” | Paired but the bridge is unreachable: local — is `node mcp/veilpay-mcp.mjs` running? relay — is the service awake?                                                                            |
-| 401 from the relay                      | The relay restarted (free tier). The extension re-registers itself within a poll and stays connected; the AI client's token was dropped with the restart, so re-pair there with a fresh code. |
-| Connector creation fails in ChatGPT     | The URL must be public `https://`; check with the smoke script. Also verify your plan allows custom connectors.                                                                               |
-| Pairing code is invalid or expired      | Codes are single-use and valid for 10 minutes. Open Settings → Agent, connect again if needed, and enter a fresh code.                                                                        |
-| First request after idle is slow        | Free-plan cold start (~30–60 s). It succeeds on retry.                                                                                                                                        |
+| Symptom                                 | Meaning                                                                                                                                                                                                                                       |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `wallet_status` errors                  | Extension closed or locked. Open Veilpay, unlock, retry.                                                                                                                                                                                      |
+| Status pill “Waiting for the AI client” | Paired but the bridge is unreachable: local — is `node mcp/veilpay-mcp.mjs` running? relay — is the service awake?                                                                                                                            |
+| 401 from the relay                      | The relay restarted (free tier). The extension re-registers itself within a poll and stays connected; the AI client's token was dropped with the restart, so re-pair there with a fresh code.                                                 |
+| Connector creation fails in ChatGPT     | The URL must be public `https://`; check with the smoke script. Also verify your plan allows custom connectors.                                                                                                                               |
+| Pairing code is invalid or expired      | Codes are single-use and valid for 15 minutes — the panel refreshes an expired one automatically; click Copy fresh code and re-enter. "Not recognized" means the AI client points at a different relay than the extension — compare the URLs. |
+| First request after idle is slow        | Free-plan cold start (~30–60 s). It succeeds on retry.                                                                                                                                                                                        |

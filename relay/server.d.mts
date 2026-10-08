@@ -37,6 +37,10 @@ export interface Relay {
   issuePairingCode(walletId: string): PairingGrant;
   /** Resolves a live code without consuming it. */
   resolvePairingCode(input: unknown): { key: string; walletId: string } | null;
+  /** Resolves a code and says why an unusable one failed. */
+  pairingCodeStatus(
+    input: unknown
+  ): { status: 'unknown' | 'expired' } | { status: 'valid'; key: string; walletId: string };
   consumePairingCode(input: unknown): string | null;
   walletCount(): number;
 }

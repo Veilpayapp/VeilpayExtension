@@ -78,6 +78,28 @@ export function AgentBridgeSettings() {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
+  // A shown code that has lapsed is a trap: the user copies a dead code, the
+  // client rejects it, and every retry fails the same way. Replace it once,
+  // automatically, the moment it expires — safe because an expired code is
+  // already unusable, and the relay returns the wallet's live code (or a fresh
+  // one) rather than invalidating anything the user could still be typing.
+  useEffect(() => {
+    if (pairingCodeExpiresAt === null) return;
+    const timer = window.setInterval(() => {
+      if (Date.now() < pairingCodeExpiresAt) return;
+      window.clearInterval(timer);
+      void send('agent.relay.pairing-code', {})
+        .then((result) => {
+          setPairingCode(result.pairingCode);
+          setPairingCodeExpiresAt(result.pairingCodeExpiresAt);
+        })
+        .catch(() => {
+          // Leave the stale code visible; the manual button still works.
+        });
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [pairingCodeExpiresAt]);
+
   const copy = async (value: string) => {
     await navigator.clipboard.writeText(value).catch(() => undefined);
     setCopied(true);
@@ -298,7 +320,8 @@ export function AgentBridgeSettings() {
           <p className="mt-3 font-body text-[11px] text-content-tertiary">{chosen.hint}</p>
           <p className="mt-2 font-body text-[11px] text-content-tertiary">
             The client opens a Veilpay page. Enter the pairing code shown above, then approve. Codes
-            expire after 10 minutes and work once.
+            stay valid for 15 minutes, work once, and are replaced here automatically if they
+            expire.
           </p>
 
           <Button

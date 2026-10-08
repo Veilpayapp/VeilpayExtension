@@ -63,7 +63,7 @@ before running this for real.
 | --------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | `GET /health`                                 | Liveness; no auth.                                                                                  |
 | `POST /wallet/register`                       | The extension registers; returns a wallet id + secret + initial pairing code.                       |
-| `POST /wallet/pairing-code`                   | Issues or returns the wallet's current 10-minute pairing code.                                      |
+| `POST /wallet/pairing-code`                   | Issues or returns the wallet's current 15-minute pairing code.                                      |
 | `GET /next`, `POST /result`                   | The extension's authenticated long-poll.                                                            |
 | `GET /.well-known/oauth-authorization-server` | OAuth discovery.                                                                                    |
 | `GET /.well-known/oauth-protected-resource`   | Resource discovery (RFC 9728).                                                                      |
@@ -90,11 +90,14 @@ to be safely operated by someone you would not otherwise trust:
 
 What is enforced here: PKCE S256 on every exchange, single-use authorization
 codes, registered-redirect validation (no open redirect), constant-time secret
-comparison, and a strict CSP on the consent page. Pairing codes are 10-minute,
+comparison, and a strict CSP on the consent page. Pairing codes are 15-minute,
 single-use Crockford-base32 codes with 40 bits of entropy; guessing is bounded by
 the short TTL and single-use consumption. A pairing code is burned only when an
 authorization actually succeeds — a malformed OAuth request leaves it usable, so
-an AI client's discovery retries cannot lock the user out.
+an AI client's discovery retries cannot lock the user out. The approve error
+page distinguishes an expired code from one this relay never issued, because
+"not recognized" almost always means the AI client points at a different relay
+than the extension is paired with.
 
 ## The honest gap to retail
 
