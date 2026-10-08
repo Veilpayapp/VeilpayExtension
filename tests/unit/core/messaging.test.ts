@@ -273,6 +273,45 @@ describe('privileged kind enforcement', () => {
     expect(response.ok).toBe(true);
   });
 
+  it('allows a privileged request when Chrome provides the extension URL but omits origin', async () => {
+    const response = await dispatch(
+      {
+        id: newId(),
+        v: 1,
+        source: 'options',
+        kind: 'agent.relay.register',
+        payload: { baseUrl: 'https://relay.example' },
+      },
+      { url: 'chrome-extension://veilpay-test/options.html' } as chrome.runtime.MessageSender,
+      handlers()
+    );
+
+    expect(response.ok).toBe(true);
+  });
+
+  it('allows a privileged request from an extension page Chrome stamped with a tab', async () => {
+    // Some Chrome builds report a tab for extension pages opened as tabs.
+    // The Chrome-stamped URL is still our own origin, which a page cannot
+    // forge, so the request is still genuinely from our options page.
+    const response = await dispatch(
+      {
+        id: newId(),
+        v: 1,
+        source: 'options',
+        kind: 'agent.relay.pairing-code',
+        payload: {},
+      },
+      {
+        origin: 'chrome-extension://veilpay-test',
+        url: 'chrome-extension://veilpay-test/options.html',
+        tab: { id: 12 } as chrome.tabs.Tab,
+      } as chrome.runtime.MessageSender,
+      handlers()
+    );
+
+    expect(response.ok).toBe(true);
+  });
+
   it('denies a privileged kind from a content script that forges its source', async () => {
     const unlock = vi.fn();
     const response = await dispatch(

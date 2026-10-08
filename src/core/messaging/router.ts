@@ -87,28 +87,52 @@ function pageOriginFromSender(sender: chrome.runtime.MessageSender): string | nu
 }
 
 /**
+ * The origin Chrome actually stamped on the sender, or null when neither field
+ * identifies one.
+ *
+ * `sender.origin` is the documented field, but some Chrome versions omit it for
+ * extension-page messages; `sender.url` is always stamped. `URL.origin`
+ * serializes non-special schemes like chrome-extension:// as "null", so the
+ * URL form is compared as scheme//host, which is exactly what an extension
+ * origin is. Never consult anything the sender itself claimed.
+ */
+function stampedSenderOrigin(sender: chrome.runtime.MessageSender): string | null {
+  if (typeof sender.origin === 'string' && sender.origin.length > 0) return sender.origin;
+  if (typeof sender.url === 'string') {
+    try {
+      const url = new URL(sender.url);
+      if (url.host.length === 0) return null;
+      return `${url.protocol}//${url.host}`;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
  * Whether a message genuinely came from an extension-owned surface.
  *
- * Three independent conditions, because the first two cannot be forged from a
- * page and the third catches a surface that should never ask for a secret:
+ * Two browser-stamped facts, neither forgeable from a page:
  *
- *  1. No `tab`. Chrome populates `sender.tab` for every content-script message
- *     and never for an extension page, so its presence alone disqualifies.
- *  2. `origin` equals our own extension origin. Chrome stamps this; a page
- *     cannot spoof it.
- *  3. The declared `source` is a UI surface. This one *is* forgeable, so it is
+ *  1. The sender's Chrome-stamped origin is our own extension origin — taken
+ *     from `sender.origin`, or from `sender.url` on Chrome builds that omit the
+ *     former. Only a frame genuinely running inside this extension can have a
+ *     chrome-extension://<id> URL; content scripts and externally-connectable
+ *     pages report the *page's* origin, never ours. (This subsumes the old
+ *     `sender.tab` veto: a tabbed sender whose stamped origin is ours is still
+ *     our own page, and one whose origin is not ours is rejected here anyway.)
+ *  2. The declared `source` is a UI surface. This one *is* forgeable, so it is
  *     never load-bearing on its own — it exists to reject `offscreen` and
- *     `inpage`, which share our origin or our bus but must not unlock a vault.
+ *     `inpage`, which share our origin or our bus but must not pair the bridge.
  */
 function isTrustedExtensionSurface(
   request: Request,
   sender: chrome.runtime.MessageSender
 ): boolean {
-  if (sender.tab !== undefined) return false;
-
   const expected = extensionOrigin();
-  if (expected === null || sender.origin !== expected) return false;
-
+  if (expected === null) return false;
+  if (stampedSenderOrigin(sender) !== expected) return false;
   return EXTENSION_SOURCES.includes(request.source);
 }
 
