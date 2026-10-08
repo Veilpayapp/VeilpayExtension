@@ -20,5 +20,13 @@ pnpm-debug.log*
 .vscode/
 
 # Local tool state (not project source)
-.claude/settings.local.json
+.claude/
 .agents/
+.kilo/
+.remember/
+.review_tmp/
+.review_tmpl
+skills-lock.json
+
+# Scratch output from the manual Stellar envelope test
+stellar-envelope.b64

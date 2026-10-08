@@ -151,9 +151,10 @@ Veilpayextension/
 │   │   └── core/             # Vault, messaging, CSP tests
 │   └── integration/          # End-to-end tests (Phase 2+)
 ├── docs/
-│   ├── ARCHITECTURE.md       # System design
-│   ├── PHASE_1_ROADMAP.md    # This phase's goals
-│   └── SETUP.md              # You are here
+│   ├── AGENT_PAYMENTS.md    # Agent payments design + threat model
+│   ├── ARCHITECTURE.md      # System design
+│   ├── MCP_SETUP.md         # Connecting Claude / ChatGPT
+│   └── SETUP.md             # You are here
 ├── scripts/
 │   ├── build.sh              # Production build
 │   ├── dev.sh                # Development watch
@@ -275,4 +276,5 @@ npm run dev
 
 Load into Chrome and verify no errors in the Service Worker console.
 
-Then review `docs/ARCHITECTURE.md` and `docs/PHASE_1_ROADMAP.md` to understand the system and priorities for Phase 2.
+Then review `docs/ARCHITECTURE.md` to understand the system, and
+`docs/MCP_SETUP.md` to connect an AI agent.

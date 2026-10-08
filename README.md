@@ -1,254 +1,172 @@
-# Veilpay — Privacy-First Ethereum Payment Extension
+<div align="center">
 
-**Status**: Phase 1 — Foundation & Messaging (In Progress)
+# Veilpay
 
-Veilpay is a Chrome extension that enables private Ethereum payments through **censorship-resistant anonymous routing** and **zero-knowledge proofs** (ZK), without requiring a centralized relayer. The extension manages HD wallet accounts, encrypts transaction data, and routes payments through mixing pools to obscure sender/recipient relationships.
+**A self-custody, multi-chain testnet wallet for Chrome — that dapps, x402 services, and AI agents can pay from, but never control.**
 
-## Vision
+[![CI](https://github.com/chiragchanchal/VeilpayExtension/actions/workflows/ci.yml/badge.svg)](https://github.com/chiragchanchal/VeilpayExtension/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Node](https://img.shields.io/badge/node-%E2%89%A520-green)
 
-Users should be able to send ETH and tokens privately with the same ease as MetaMask, without:
-- Trusting a third party (no relayer, no privacy service)
-- Exposing transaction graph to blockchain analysis
-- Sacrificing transaction speed or cost
+*Keys never leave the extension. Every payment is capped, prompted, and audit-logged.*
 
-Veilpay achieves this through:
-1. **Ephemeral keypairs** derived from a master seed (BIP-32-inspired)
-2. **ZK proofs** that prove ownership without revealing identity
-3. **Mixing pools** that break on-chain transaction links
-4. **Onion routing** for message confidentiality between nodes
-
-## Architecture
-
-```
-┌─ Content Script (inpage.ts)
-│  └─ Injects `window.veilpay` into page context
-│     └─ Pages call: veilpay.send({ to, amount, token })
-│
-├─ Background Service Worker (background/index.ts)
-│  ├─ Message router + protocol validation
-│  ├─ Vault (encrypted key storage, crypto ops)
-│  └─ State stores (accounts, transactions, settings)
-│
-├─ Popup UI (popup/App.tsx)
-│  ├─ Account dashboard
-│  ├─ Send form + approval flow
-│  ├─ Transaction history
-│  └─ Settings
-│
-├─ Side Panel (sidepanel/App.tsx)
-│  └─ Quick access to vault + pending transactions
-│
-└─ Options Page (options/App.tsx)
-   └─ Advanced settings, key recovery, network config
-```
-
-**Data Flow**:
-```
-page → content script ┬─ [IPC bridge] → background service worker
-                      └─ onMessage callback
-
-page requests veilpay.send() → content validates → background processes → stores Zustand state → notifies popup
-```
-
-## Phase 1: Foundation & Messaging (Current)
-
-**Goals**:
-- [ ] Establish typed message protocol (`protocol.ts`)
-- [ ] Build message router and client library
-- [ ] Implement vault (encrypted storage, crypto ops)
-- [ ] Wire messaging across service worker, content script, and inpage script
-- [ ] Set up React UI skeleton (popup, side panel, options)
-- [ ] Configure build, CI/CD, and testing infrastructure
-- [ ] Prove CSP/ZK proof spike (offline, no relayer)
-
-**Deliverables**:
-- TypeScript message protocol with full type safety
-- Working vault with AES-GCM encryption (SubtleCrypto)
-- Messaging client/router pattern
-- Popup that displays vault status
-- CSP spike test proving ephemeral key derivation + proof generation
-
-**Key Files**:
-- `src/core/messaging/protocol.ts` — Request/response types
-- `src/core/messaging/client.ts` — Message sender
-- `src/core/messaging/router.ts` — Message handler registry
-- `src/core/vault/crypto.ts` — SubtleCrypto wrapper
-- `src/core/vault/storage.ts` — IndexedDB vault
-- `src/background/index.ts` — Service worker entry
-- `src/content/index.ts` — Content script + bridge
-- `tests/unit/core/csp-zk.spike.test.ts` — Proof spike
-
-## Phase 2: Wallet Integration & HD Keys
-
-**Goals**:
-- Implement BIP-32/BIP-44 HD wallet derivation
-- Add account management (create, import, recover)
-- Wire popup send form to background
-- Implement transaction approval flow
-- Add network support (Ethereum mainnet + testnets)
-
-## Phase 3: ZK Proofs & Mixing
-
-**Goals**:
-- Implement ZK proof circuit for ownership
-- Connect to mixing pool smart contracts
-- Implement onion routing message layer
-- Add transaction bundling
-
-## Phase 4: Privacy & UX Polish
-
-**Goals**:
-- Add privacy settings (mixing rounds, delay, fee tolerance)
-- Implement transaction history view
-- Add account recovery from seed phrase
-- Polish UI and accessibility
+</div>
 
 ---
 
-## Quick Start
+## What is Veilpay?
 
-### Prerequisites
-- **Node.js** 20.x
-- **Chrome** (Manifest v3 compatible)
+Veilpay is a Manifest V3 Chrome extension that holds your own keys and speaks
+three chains at once — **EVM (Sepolia)**, **Solana (devnet)**, and
+**Stellar (testnet)**. It exposes a normal wallet provider to dapps, answers
+[x402](https://x402.dev/) payment challenges inside `fetch`, and ships an
+[MCP](https://modelcontextprotocol.io) server so **Claude and ChatGPT can
+check balances and send testnet payments on your behalf** — always inside
+spending caps you set, and with approval prompts for anything above them.
 
-### Install
+> **Testnet only.** Sepolia ETH, devnet SOL, testnet XLM. There is no mainnet
+> path — by design, this is a place to experiment safely.
+
+## Highlights
+
+| | |
+| --- | --- |
+| 🔐 **Self-custody** | HD wallet (BIP-32/39), AES-GCM encrypted vault in IndexedDB, auto-lock |
+| ⛓️ **Three chains** | EVM + Solana + Stellar accounts from one seed |
+| 🖥️ **Dapp provider** | `window.veilpay`, EIP-1193 `ethereum`, and `solana` providers in pages |
+| 💸 **x402 payments** | HTTP 402 payment challenges intercepted and settled from the wallet |
+| 🤖 **AI agent payments** | MCP server (`mcp/`), hosted relay (`relay/`), OAuth pairing code |
+| 🧢 **Spending caps (VAP)** | Per-origin grants with `maxPerWindow` limits, prompt above threshold |
+| 🔔 **Human approvals** | Every transaction above your threshold opens an approval overlay |
+| 📜 **Audit ledger** | Hash-chained, append-only record of every sensitive operation |
+| 🚰 **Built-in faucet** | Fund all three testnets from the extension |
+
+## Install (anyone can run it)
+
+**Prerequisites:** [Node.js 20+](https://nodejs.org/) and Chrome/Chromium.
 
 ```bash
+git clone https://github.com/chiragchanchal/VeilpayExtension.git
+cd VeilpayExtension
 npm install
 npm run build
 ```
 
-### Load into Chrome
+Then load it into Chrome:
 
 1. Open `chrome://extensions`
-2. Enable **Developer mode**
-3. Click **Load unpacked** → select `dist/` folder
-4. Pin extension to toolbar
+2. Enable **Developer mode** (top-right toggle)
+3. Click **Load unpacked** → select the `dist/` folder
+4. Pin Veilpay to your toolbar
 
-### Development
+First run: create a vault, save the seed phrase somewhere safe, and use the
+built-in faucet to fund your testnet accounts.
+
+## Let Claude or ChatGPT pay from it
+
+The extension ships everything needed for agent payments — no extra install.
+
+1. In the extension: **Settings → Agent → Connect** (relay mode). The panel
+   shows an 8-character **pairing code** and copies the connector URL.
+2. In Claude: **Settings → Connectors → Add custom connector**.
+   In ChatGPT: **Settings → Connectors → Add MCP server**.
+3. Paste `https://veilpay-relay.onrender.com/mcp` (the default relay) — or your
+   own deployment from the next section.
+4. When the relay's pairing page opens, type the code from the extension, and
+   approve.
+
+You ask, the agent calls a tool, the wallet decides:
+
+> **You:** what's my Solana balance?
+> **Claude:** *(calls `get_balance`)* 4.25 SOL on devnet.
+> **You:** send 0.5 to `9xQe…`
+> **Claude:** *(calls `send_payment`)* Sent — the wallet asked you to approve it
+> first, because it's above your cap.
+
+Six tools are exposed: `wallet_status`, `list_accounts`, `get_balance`,
+`send_payment`, `list_grants`, `revoke_grant`. Spending caps and approval
+prompts apply to the agent exactly as they do to a dapp.
+
+**Full guide — local mode (Claude Code / Claude Desktop), relay mode, and
+troubleshooting: [docs/MCP_SETUP.md](docs/MCP_SETUP.md)**
+
+### Run your own relay (optional, free)
+
+Prefer not to use the default hosted relay? Deploy your own in one click on
+Render's free tier:
+
+[![Deploy to Render](https://render.com/images/deploy-button.svg)](https://render.com/deploy?repo=https://github.com/chiragchanchal/VeilpayExtension)
+
+Zero-dependency Node — `render.yaml` and a `Dockerfile` are included for any
+other host. The relay only moves *messages*: it never sees keys, and cannot
+sign anything. Design and threat model:
+[docs/AGENT_PAYMENTS.md](docs/AGENT_PAYMENTS.md).
+
+## Architecture
+
+```
+┌────────────────┐  provider + approvals   ┌──────────────────────────┐
+│  dapp (page)   │ ──────────────────────► │  content + inpage bridge │
+└────────────────┘                         └───────────┬──────────────┘
+┌────────────────┐  x402 challenge          ┌───────────▼──────────────┐
+│  x402 service  │                          │   background worker      │
+└────────────────┘                          │  vault · chains · grants │
+┌────────────────┐  MCP over relay/stdio    │  approvals · audit ledger│
+│  Claude / GPT  │ ──────────────────────►  └──────────────────────────┘
+└────────────────┘            (asks; never signs)
+```
+
+- `src/background/` — service worker: message router, vault ops, chain
+  clients, approval flows, agent bridge
+- `src/content/`, `src/core/x402/` — page provider and the fetch interceptor
+- `src/core/vault/` — AES-GCM encrypted key storage (PBKDF2 + WebCrypto)
+- `src/core/chains/` — EVM, Solana, and Stellar transaction building/signing
+  on [@noble/curves](https://github.com/paulmillr/noble-curves)
+- `src/ui/`, `src/popup/`, `src/sidepanel/`, `src/options/` — React 19 +
+  Tailwind surfaces
+- `relay/` — the hosted agent relay (OAuth + long-poll bridge, zero deps)
+- `mcp/` — the local MCP server for Claude Code / Claude Desktop
+- `docs/` — [architecture](docs/ARCHITECTURE.md) ·
+  [agent payments](docs/AGENT_PAYMENTS.md) ·
+  [MCP setup](docs/MCP_SETUP.md) · [setup](docs/SETUP.md)
+
+## Security model
+
+- **Keys stay home.** Private keys live only in the extension's encrypted
+  vault and are never exported, logged, or sent to any dapp, relay, or server.
+- **The relay and MCP server cannot sign.** They relay *requests*; the
+  extension enforces caps, prompts, and signs locally.
+- **Privileged actions are origin-gated.** Vault unlock, pairing, and grant
+  changes are only accepted from the extension's own UI, verified by
+  Chrome-stamped sender fields — never from a page.
+- **Approvals are transient.** Pending approvals live in session storage and
+  are cancelled when the vault locks.
+
+## Development
 
 ```bash
-npm run dev         # Watch mode (Vite)
-npm run test:unit   # Run tests
-npm run lint        # Check code quality
+npm run dev          # Vite watch mode → dist/
+npm run test         # full suite (512 tests)
+npm run lint         # ESLint, zero warnings allowed
+npm run typecheck    # strict TypeScript
+npm run build        # typecheck + production build
+npm run gate:all     # everything: types, lint, tests, build, size, secrets
+npm run smoke:agent  # live end-to-end check of the relay + MCP + OAuth stack
+npm run sim:pairing  # simulates the full pairing flow, incl. relay restarts
+npm run x402:server  # local x402 reference server for manual testing
 ```
 
-See `docs/SETUP.md` for detailed instructions.
-
-## AI agents (MCP)
-
-Claude and ChatGPT can pay from this wallet over MCP — the extension's caps
-and approval prompts still apply, and it is testnet-only. Local mode runs
-`mcp/veilpay-mcp.mjs` (Claude Code / Claude Desktop); relay mode deploys
-`relay/server.mjs` for one-click web connectors. Full guide with free
-Render deployment: **`docs/MCP_SETUP.md`**. Verify the whole stack with
-`npm run smoke:agent`.
-
----
-
-## Tech Stack
-
-- **Build**: Vite + esbuild
-- **Runtime**: Chrome Extensions API (Manifest v3)
-- **Crypto**: SubtleCrypto (Web Crypto API)
-- **Storage**: IndexedDB (via idb-keyval)
-- **State**: Zustand
-- **UI**: React 18 + TypeScript + Tailwind CSS
-- **Testing**: Vitest + jsdom
-- **CI/CD**: GitHub Actions
-- **Type Safety**: TypeScript strict mode
-
----
-
-## Security Considerations
-
-### Phase 1 Constraints
-
-- **No relayer**: All proof generation is offline and deterministic
-- **Encrypted vault**: Keys stored as AES-GCM ciphertext in IndexedDB
-- **No key export**: Private keys never leave the extension context
-- **Deterministic crypto**: SubtleCrypto ensures reproducible signatures (no nonce randomness in tests)
-
-### Known Limitations
-
-- CSP spike is offline; Phase 2 will connect to actual mixing pools
-- No transaction broadcast yet (Phase 2)
-- No fee estimation (Phase 2)
-- No token support yet (Phase 1 is ETH only; Phase 3+ adds ERC-20)
-
-### Audit Notes
-
-- Review `src/core/vault/crypto.ts` for key derivation + encryption
-- Review `src/core/messaging/protocol.ts` for message validation
-- Review message handling in `src/background/index.ts` for authorization checks
-- All private keys are ephemeral and derived on-the-fly (no persistent secrets except master seed in vault)
-
----
-
-## Project Structure
-
-```
-Veilpayextension/
-├── src/
-│   ├── background/           # Service worker
-│   ├── content/              # Content script + inpage bridge
-│   ├── popup/                # Popup UI (React)
-│   ├── sidepanel/            # Side panel UI (React)
-│   ├── options/              # Options page (React)
-│   ├── offscreen/            # Offscreen document
-│   ├── core/
-│   │   ├── messaging/        # Protocol + client + router
-│   │   ├── vault/            # Crypto + storage
-│   │   ├── stores/           # Zustand stores
-│   │   └── spike/            # CSP/ZK proof experiments
-│   ├── ui/
-│   │   ├── theme/            # Tailwind tokens
-│   │   └── components/       # Reusable components (Phase 2+)
-│   └── manifest.config.ts    # Manifest v3 generator
-├── public/
-│   ├── icons/                # Extension icons
-│   └── *.html                # Entry point templates
-├── tests/
-│   ├── unit/                 # Unit tests
-│   └── fixtures/             # Mock data
-├── docs/
-│   ├── ARCHITECTURE.md       # System design
-│   ├── PHASE_1_ROADMAP.md    # This phase's goals
-│   └── SETUP.md              # Setup guide
-├── scripts/
-│   ├── build.sh              # Build script
-│   ├── dev.sh                # Dev watch script
-│   └── csp-spike.sh          # CSP spike runner
-└── vite.config.ts            # Build config
-```
-
----
+A dapp playground for the provider surface is included: run `npm run dev`
+and open `http://localhost:5173/dapp-demo.html` — it exercises connect,
+sign, send, and a full x402 payment against the wallet.
 
 ## Contributing
 
-1. Read `docs/ARCHITECTURE.md` to understand the system
-2. Check `docs/PHASE_1_ROADMAP.md` for current priorities
-3. Follow the message protocol in `src/core/messaging/protocol.ts`
-4. Add tests for any new feature
-5. Run `npm run lint` and `npm run typecheck` before pushing
-
----
+1. Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) first
+2. Follow the message protocol in `src/core/messaging/protocol.ts`
+3. Add tests for anything you change — `npm run gate:all` must pass
+4. Keep the bundle lean: `npm run build:check-size` enforces the budget
 
 ## License
 
-MIT
-
----
-
-## Support
-
-- **Issues**: GitHub Issues
-- **Docs**: See `docs/` directory
-- **Setup**: `docs/SETUP.md`
-- **Architecture**: `docs/ARCHITECTURE.md`
-
----
-
-**Phase 1 Status**: Foundation scaffolding complete. Next: Integrate wallet + prove CSP/ZK spike.
-# VeilpayExtension
-# VeilpayExtension
+[MIT](LICENSE) — clone it, run it, build on it.

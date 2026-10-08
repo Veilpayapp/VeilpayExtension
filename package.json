@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "description": "Veilpay browser extension — self-custody multi-chain wallet with native agent payments (VAP) and x402 support",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=20.11.0"
@@ -28,7 +28,6 @@
     "x402:server": "node scripts/x402-reference-server.mjs",
     "smoke:agent": "node scripts/smoke-agent-stack.mjs",
     "sim:pairing": "node scripts/simulate-pairing-flow.mjs",
-    "package": "node scripts/package-extension.mjs",
     "icons": "node scripts/generate-icons.mjs"
   },
   "dependencies": {
