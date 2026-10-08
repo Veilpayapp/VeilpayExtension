@@ -120,8 +120,9 @@ The relay is a single zero-dependency Node process.
 2. Open
    [**Deploy to Render**](https://render.com/deploy?repo=https://github.com/chiragchanchal/VeilpayExtension)
    — the `render.yaml` blueprint in the repo root provisions a free web
-   service. (Manual path: Render dashboard → New → Blueprint → select the
-   repo.)
+   service. The button deploys the default branch; if `render.yaml` only
+   exists on another branch (until it is merged), use Render → New →
+   Blueprint → select the repo, and pick that branch.
 3. When it is live, note the URL, e.g. `https://veilpay-relay.onrender.com`,
    then verify it:
 
