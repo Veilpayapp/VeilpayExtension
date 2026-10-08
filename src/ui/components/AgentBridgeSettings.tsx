@@ -78,27 +78,35 @@ export function AgentBridgeSettings() {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
-  // A shown code that has lapsed is a trap: the user copies a dead code, the
-  // client rejects it, and every retry fails the same way. Replace it once,
-  // automatically, the moment it expires — safe because an expired code is
-  // already unusable, and the relay returns the wallet's live code (or a fresh
-  // one) rather than invalidating anything the user could still be typing.
+  // The displayed code must always be the relay's live one. A restart (a
+  // deploy, a free-tier sleep) silently invalidates whatever was issued at
+  // Connect time, and a stale code is exactly the relay's "does not recognize
+  // that code" rejection. Refreshing is safe: the relay returns the same live
+  // code while it is valid — this never swaps a code out from under someone
+  // who is typing it — and after a wipe it surfaces the replacement at once,
+  // because the background has re-registered the wallet by then.
   useEffect(() => {
-    if (pairingCodeExpiresAt === null) return;
-    const timer = window.setInterval(() => {
-      if (Date.now() < pairingCodeExpiresAt) return;
-      window.clearInterval(timer);
+    if (status?.mode !== 'relay' || status.paired !== true) return;
+    let cancelled = false;
+    const refreshCode = () => {
       void send('agent.relay.pairing-code', {})
         .then((result) => {
+          if (cancelled) return;
           setPairingCode(result.pairingCode);
           setPairingCodeExpiresAt(result.pairingCodeExpiresAt);
         })
         .catch(() => {
-          // Leave the stale code visible; the manual button still works.
+          // Keep the last shown code; the retry in ten seconds covers a
+          // restart-in-progress, and the manual button surfaces the error.
         });
-    }, 1_000);
-    return () => window.clearInterval(timer);
-  }, [pairingCodeExpiresAt]);
+    };
+    refreshCode();
+    const timer = window.setInterval(refreshCode, 10_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [status?.mode, status?.paired]);
 
   const copy = async (value: string) => {
     await navigator.clipboard.writeText(value).catch(() => undefined);
@@ -319,9 +327,9 @@ export function AgentBridgeSettings() {
 
           <p className="mt-3 font-body text-[11px] text-content-tertiary">{chosen.hint}</p>
           <p className="mt-2 font-body text-[11px] text-content-tertiary">
-            The client opens a Veilpay page. Enter the pairing code shown above, then approve. Codes
-            stay valid for 15 minutes, work once, and are replaced here automatically if they
-            expire.
+            The client opens a Veilpay page. Enter the pairing code shown above, then approve. The
+            code above is always the relay's current one — it is replaced automatically if it
+            expires or the relay restarts.
           </p>
 
           <Button
