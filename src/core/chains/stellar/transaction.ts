@@ -302,16 +302,15 @@ function xdrPaymentOperation(
 }
 
 /**
- * Encodes a Transaction XDR struct for a payment.
+ * Encodes a Transaction XDR struct for an arbitrary list of prebuilt
+ * operations (shared by the payment and change-trust builders).
  */
-function xdrTransaction(
+function xdrTransactionOps(
   sourcePubkey: Uint8Array,
   fee: number,
   seqNum: bigint,
-  destPubkey: Uint8Array,
-  amount: bigint,
-  asset: StellarAssetXdr,
   memo: string | undefined,
+  operations: Uint8Array[],
 ): Uint8Array {
   // sourceAccount: AccountID = PUBLIC_KEY_TYPE_ED25519 + 32 bytes
   const sourceAccount = xdrPublicKey(sourcePubkey);
@@ -323,8 +322,6 @@ function xdrTransaction(
   const preconditions = xdrPreconditionsNone();
   // memo: MEMO_NONE or MEMO_TEXT
   const memoXdr = xdrMemo(memo);
-  // operations: Operation[] = [payment operation]
-  const operations = xdrArray([xdrPaymentOperation(destPubkey, amount, asset)]);
   // ext: v=0
   const ext = xdrUint32(0);
 
@@ -334,9 +331,26 @@ function xdrTransaction(
     seqNumXdr,
     preconditions,
     memoXdr,
-    operations,
+    xdrArray(operations),
     ext,
   ]);
+}
+
+/**
+ * Encodes a CHANGE_TRUST operation.
+ *
+ * XDR:
+ *   struct ChangeTrustOp {
+ *     Asset line;    // the asset to trust (issued, never native)
+ *     int64 limit;   // max units to hold; INT64_MAX means "no limit"
+ *   }
+ *   Operation { sourceAccount=null, body = union { case CHANGE_TRUST: ... } }
+ *   OperationType: CHANGE_TRUST = 7.
+ */
+function xdrChangeTrustOperation(asset: StellarAssetXdr, limit: bigint): Uint8Array {
+  const nullSourcePointer = xdrUint32(0); // MuxedAccount* = null
+  const body = concat([xdrUint32(7), xdrAsset(asset), xdrInt64(limit)]); // CHANGE_TRUST = 7
+  return concat([nullSourcePointer, body]);
 }
 
 // ---------------------------------------------------------------------------
@@ -344,17 +358,16 @@ function xdrTransaction(
 // ---------------------------------------------------------------------------
 
 /**
- * Builds, signs, and serializes a Stellar payment transaction.
- *
- * Defaults to a native XLM payment; pass `tx.asset` with `type: 'issued'` to
- * send a specific testnet token (asset code + issuer).
- *
- * @param tx - The unsigned payment parameters.
- * @param privateKey - 32-byte ed25519 private key (from vault).
- * @returns The signed transaction envelope as base64 XDR.
+ * Shared build-sign-serialize core: produces a signed TransactionEnvelope
+ * for a set of operations from one source account.
  */
-export function signStellarPayment(
-  tx: UnsignedStellarPayment,
+function signStellarEnvelope(
+  from: string,
+  fee: number,
+  sequence: bigint,
+  memo: string | undefined,
+  operations: Uint8Array[],
+  networkPassphrase: string | undefined,
   privateKey: Uint8Array,
 ): SignedStellarTransaction {
   if (privateKey.length !== 32) {
@@ -363,33 +376,21 @@ export function signStellarPayment(
     );
   }
 
-  const sourcePubkey = decodeStellarAddress(tx.from);
-  const destPubkey = decodeStellarAddress(tx.to);
-
-  const asset: StellarAssetXdr = tx.asset ?? { type: 'native' };
+  const sourcePubkey = decodeStellarAddress(from);
 
   // Stellar requires a transaction's seqNum to be the account's CURRENT
   // sequence + 1 (Horizon advances the account's sequence to the tx seqNum
-  // once it is included). `tx.sequence` is Horizon's current value, so bump it.
-  const seqNum = tx.sequence + 1n;
+  // once it is included). `sequence` is Horizon's current value, so bump it.
+  const seqNum = sequence + 1n;
 
-  // Build the Transaction XDR
-  const txXdr = xdrTransaction(
-    sourcePubkey,
-    tx.fee,
-    seqNum,
-    destPubkey,
-    tx.amount,
-    asset,
-    tx.memo,
-  );
+  const txXdr = xdrTransactionOps(sourcePubkey, fee, seqNum, memo, operations);
 
   // The network transaction hash is the SHA-256 of the Stellar signature
   // pre-image: `networkId || taggedTransaction`, where networkId binds the
   // transaction to the network's passphrase. Signing only sha256(txXdr)
   // (without the network prefix) makes a signature Horizon always rejects with
   // tx_bad_auth, even though the XDR itself is valid.
-  const networkId = stellarNetworkId(tx.networkPassphrase ?? STELLAR_TESTNET_PASSPHRASE);
+  const networkId = stellarNetworkId(networkPassphrase ?? STELLAR_TESTNET_PASSPHRASE);
   const txHash = sha256(stellarSignatureBase(networkId, txXdr));
 
   // Sign the hash
@@ -402,25 +403,89 @@ export function signStellarPayment(
   const sigXdr = xdrOpaque(signature);
   const decoratedSignature = concat([hint, sigXdr]);
 
-  // Build the TransactionEnvelope:
-  //   union TransactionEnvelope switch (EnvelopeType type) {
-  //     case ENVELOPE_TYPE_TX_V0: TransactionV0Envelope v0;
-  //     case ENVELOPE_TYPE_TX: TransactionV1Envelope v1;
-  //     case ENVELOPE_TYPE_TX_FEE_BUMP: FeeBumpTransactionEnvelope feeBump;
-  //   };
-  // The envelope body is preceded by the union discriminant (2 = TX v1).
-  // Omitting it misaligns the whole struct and Horizon cannot decode it.
+  // Build the TransactionEnvelope (discriminant 2 = TX v1):
   const ENVELOPE_TYPE_TX = 2;
   const envelope = concat([xdrUint32(ENVELOPE_TYPE_TX), txXdr, xdrArray([decoratedSignature])]);
 
-  // Compute the from address
-  const from = encodeStellarAddress(sourcePubkey);
+  const fromAddress = encodeStellarAddress(sourcePubkey);
 
   return {
     raw: btoa(String.fromCharCode(...envelope)),
     signingHash: bytesToHex(txHash),
-    from,
+    from: fromAddress,
   };
+}
+
+/**
+ * Builds, signs, and serializes a Stellar payment transaction.
+ *
+ * Defaults to a native XLM payment; pass `tx.asset` with `type: 'issued'` to
+ * send a specific issued token (asset code + issuer).
+ *
+ * @param tx - The unsigned payment parameters.
+ * @param privateKey - 32-byte ed25519 private key (from vault).
+ * @returns The signed transaction envelope as base64 XDR.
+ */
+export function signStellarPayment(
+  tx: UnsignedStellarPayment,
+  privateKey: Uint8Array,
+): SignedStellarTransaction {
+  const destPubkey = decodeStellarAddress(tx.to);
+  const asset: StellarAssetXdr = tx.asset ?? { type: 'native' };
+  return signStellarEnvelope(
+    tx.from,
+    tx.fee,
+    tx.sequence,
+    tx.memo,
+    [xdrPaymentOperation(destPubkey, tx.amount, asset)],
+    tx.networkPassphrase,
+    privateKey,
+  );
+}
+
+/** An unsigned Stellar change-trust (trustline) transaction. */
+export interface UnsignedStellarChangeTrust {
+  /** Stellar address (G...) of the account adding the trustline. */
+  from: string;
+  /** The issued asset to trust — native is rejected (nothing to trust). */
+  asset: StellarAssetXdr;
+  /**
+   * Trust limit in the asset's smallest unit. INT64_MAX (2^63-1) is the
+   * canonical "no limit" value most wallets use.
+   */
+  limit: bigint;
+  /** Account sequence number from Horizon. */
+  sequence: bigint;
+  /** Base fee in stroops. */
+  fee: number;
+  /** Network passphrase. Defaults to the Stellar testnet passphrase. */
+  networkPassphrase?: string;
+}
+
+/** The canonical "no limit" trustline value: 2^63 - 1 stroops-equivalent. */
+export const STELLAR_TRUSTLINE_NO_LIMIT = 2n ** 63n - 1n;
+
+/**
+ * Builds, signs, and serializes a CHANGE_TRUST transaction — the Stellar
+ * equivalent of MetaMask's "add token": the account accepts holding the
+ * issued asset, after which payments in it succeed.
+ */
+export function signStellarChangeTrust(
+  tx: UnsignedStellarChangeTrust,
+  privateKey: Uint8Array,
+): SignedStellarTransaction {
+  if (tx.asset.type === 'native' || tx.asset.code === undefined || tx.asset.issuer === undefined) {
+    throw new Error('A trustline requires an issued asset (code + issuer), not native XLM.');
+  }
+  return signStellarEnvelope(
+    tx.from,
+    tx.fee,
+    tx.sequence,
+    undefined,
+    [xdrChangeTrustOperation(tx.asset, tx.limit)],
+    tx.networkPassphrase,
+    privateKey,
+  );
 }
 
 // ---------------------------------------------------------------------------

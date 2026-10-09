@@ -502,6 +502,30 @@ export async function dispatch(
           ok: true,
           data: await handlers['networks.custom.remove'](request.payload, ctx),
         };
+      case 'tokens.list':
+        return {
+          id: request.id,
+          ok: true,
+          data: await handlers['tokens.list'](request.payload, ctx),
+        };
+      case 'tokens.add':
+        return {
+          id: request.id,
+          ok: true,
+          data: await handlers['tokens.add'](request.payload, ctx),
+        };
+      case 'tokens.remove':
+        return {
+          id: request.id,
+          ok: true,
+          data: await handlers['tokens.remove'](request.payload, ctx),
+        };
+      case 'tokens.balances':
+        return {
+          id: request.id,
+          ok: true,
+          data: await handlers['tokens.balances'](request.payload, ctx),
+        };
       case 'tx.pending':
         return {
           id: request.id,

@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { createClient } from '@/core/messaging/client';
 import type {
   ChainId,
+  CustomToken,
   MessageSource,
   NetworkSummary,
   StellarAssetInput,
@@ -149,6 +150,10 @@ interface WalletState {
   networks: NetworkSummary[];
   /** The selected network id per chain (from the background's persisted selection). */
   selectedNetworks: Partial<Record<ChainId, string>>;
+  /** Registered custom tokens (MetaMask-style add-token registry). */
+  customTokens: CustomToken[];
+  /** Base-unit token balances, keyed by token registry id. */
+  tokenBalances: Partial<Record<string, bigint>>;
 }
 
 interface WalletActions {
@@ -287,6 +292,21 @@ interface WalletActions {
   }): Promise<boolean>;
   /** Networks: remove a custom RPC by name. */
   removeCustomNetwork(name: string): Promise<boolean>;
+  /** Tokens: load the registry (and refresh balances for loaded accounts). */
+  loadTokens(): Promise<void>;
+  /** Tokens: register one. Returns the token plus any trustline hash. Throws on failure. */
+  addToken(input: {
+    chain: ChainId;
+    contract?: string;
+    code?: string;
+    issuer?: string;
+    symbol?: string;
+    createTrustline?: boolean;
+  }): Promise<{ token: CustomToken; trustlineHash?: string }>;
+  /** Tokens: remove one by registry id. */
+  removeToken(id: string): Promise<boolean>;
+  /** Tokens: refresh balances for every registered token of one address. */
+  loadTokenBalances(chain: ChainId, address: string): Promise<void>;
 }
 
 const send = createClient('popup' as MessageSource);
@@ -364,6 +384,8 @@ export const useWallet = create<WalletState & WalletActions>((set, get) => ({
   pendingWcRequest: null,
   networks: [],
   selectedNetworks: {},
+  customTokens: [],
+  tokenBalances: {},
   isLoading: false,
   error: null,
 
@@ -385,6 +407,7 @@ export const useWallet = create<WalletState & WalletActions>((set, get) => ({
           set({ selectedAccountIdx: restored });
         }
         await get().loadNetworks();
+        await get().loadTokens();
       } catch (firstError) {
         // Chrome can be slow to wake a cold service worker; the first status
         // read occasionally times out before the SW registers. Retry once
@@ -981,6 +1004,72 @@ export const useWallet = create<WalletState & WalletActions>((set, get) => ({
       return false;
     } finally {
       set({ isLoading: false });
+    }
+  },
+
+  // ---- Custom tokens -------------------------------------------------------
+
+  loadTokens: async () => {
+    try {
+      const tokens = await send('tokens.list', {});
+      set({ customTokens: Array.isArray(tokens) ? tokens : [] });
+      // Balances are per-address: refresh for every account already loaded.
+      const { accounts } = get();
+      await Promise.all(
+        accounts.map((account) => get().loadTokenBalances(account.chain, account.address)),
+      );
+    } catch {
+      // Optional read; keep the previous list rather than blocking boot.
+    }
+  },
+
+  addToken: async (input) => {
+    set({ isLoading: true, error: null });
+    try {
+      const result = await send('tokens.add', input);
+      await get().loadTokens();
+      return result;
+    } catch (cause) {
+      set({ error: messageFor(cause, 'Could not add the token.') });
+      throw cause;
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
+  removeToken: async (id) => {
+    set({ isLoading: true, error: null });
+    try {
+      const { ok } = await send('tokens.remove', { id });
+      if (ok) {
+        const tokenBalances = { ...get().tokenBalances };
+        delete tokenBalances[id];
+        set({ customTokens: get().customTokens.filter((t) => t.id !== id), tokenBalances });
+      }
+      return ok;
+    } catch (cause) {
+      set({ error: messageFor(cause, 'Could not remove the token.') });
+      return false;
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
+  loadTokenBalances: async (chain, address) => {
+    try {
+      const balances = await send('tokens.balances', { chain, address });
+      if (!Array.isArray(balances)) return;
+      const next = { ...get().tokenBalances };
+      for (const entry of balances) {
+        try {
+          next[entry.id] = BigInt(entry.balance);
+        } catch {
+          next[entry.id] = 0n;
+        }
+      }
+      set({ tokenBalances: next });
+    } catch {
+      // Optional read; failures leave the previous balances rendered.
     }
   },
 }));

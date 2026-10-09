@@ -42,7 +42,14 @@ import {
   type UnsignedSolanaTransfer,
 } from '@/core/chains/solana/transaction';
 import { erc20TransferCalldata } from '@/core/chains/evm/erc20';
-import { signStellarPayment, type UnsignedStellarPayment } from '@/core/chains/stellar/transaction';
+import { signStellarPayment, signStellarChangeTrust, STELLAR_TRUSTLINE_NO_LIMIT, type UnsignedStellarPayment } from '@/core/chains/stellar/transaction';
+import {
+  addCustomToken,
+  listCustomTokens,
+  removeCustomToken,
+  tokenId,
+  type CustomToken,
+} from '@/core/tokens';
 import { base58 } from '@scure/base';
 import { bytesToHex } from '@noble/hashes/utils';
 import {
@@ -1755,6 +1762,151 @@ const handlers: HandlerMap = {
     await removeCustomNetwork(payload.name);
     return { ok: true };
   },
+
+  // ── Custom tokens (MetaMask-style add-token) ──────────────────────────
+  //
+  // `tokens.add`/`tokens.remove` are privileged (router): a token can carry
+  // a trustline broadcast signed with the vault key, and the send path trusts
+  // this metadata, so a page must never write here.
+
+  'tokens.list': async (payload) =>
+    payload.chain !== undefined ? await listCustomTokens(payload.chain) : await listCustomTokens(),
+
+  'tokens.add': async (payload) => {
+    switch (payload.chain) {
+      case 'evm': {
+        const contract = payload.contract?.trim() ?? '';
+        if (!/^0x[0-9a-fA-F]{40}$/.test(contract)) {
+          throw new ProtocolError('BAD_REQUEST', 'Enter a valid ERC-20 contract address (0x…).');
+        }
+        const service = createChainService('evm', await resolveNetworkRpcUrl('evm'));
+        if (
+          typeof service.erc20Decimals !== 'function' ||
+          typeof service.erc20BalanceOf !== 'function'
+        ) {
+          throw new ProtocolError('BAD_REQUEST', 'EVM token support unavailable.');
+        }
+        // Metadata is read from the chain — the registry never trusts a
+        // caller-supplied symbol/decimals for EVM, exactly like MetaMask.
+        const [decimals, symbol, name] = await Promise.all([
+          service.erc20Decimals(contract),
+          service
+            .erc20Symbol!(contract)
+            .catch(() => payload.symbol ?? 'ERC20'),
+          service
+            .erc20Name!(contract)
+            .catch(() => undefined),
+        ]);
+        const token: CustomToken = {
+          id: tokenId('evm', 'erc20', contract),
+          chain: 'evm',
+          kind: 'erc20',
+          address: contract,
+          symbol: (symbol ?? 'ERC20').slice(0, 32),
+          ...(typeof name === 'string' && name.length > 0 ? { name: name.slice(0, 128) } : {}),
+          decimals,
+          addedAt: Date.now(),
+        };
+        await addCustomToken(token);
+        return { token };
+      }
+      case 'solana': {
+        const mint = payload.contract?.trim() ?? '';
+        if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) {
+          throw new ProtocolError('BAD_REQUEST', 'Enter a valid SPL mint address (base58).');
+        }
+        const service = createChainService('solana', await resolveNetworkRpcUrl('solana'));
+        if (typeof service.mintDecimals !== 'function') {
+          throw new ProtocolError('BAD_REQUEST', 'Solana token support unavailable.');
+        }
+        const decimals = await service.mintDecimals(mint);
+        const token: CustomToken = {
+          id: tokenId('solana', 'spl', mint),
+          chain: 'solana',
+          kind: 'spl',
+          address: mint,
+          symbol: (payload.symbol ?? 'SPL').slice(0, 32),
+          decimals,
+          addedAt: Date.now(),
+        };
+        await addCustomToken(token);
+        return { token };
+      }
+      case 'stellar': {
+        const code = payload.code?.trim() ?? '';
+        const issuer = payload.issuer?.trim() ?? '';
+        if (code.length === 0 || issuer.length === 0) {
+          throw new ProtocolError('BAD_REQUEST', 'A Stellar asset needs a code and an issuer (G…).');
+        }
+        const token: CustomToken = {
+          id: tokenId('stellar', 'stellar-issued', `${code}:${issuer}`),
+          chain: 'stellar',
+          kind: 'stellar-issued',
+          code,
+          issuer,
+          symbol: (payload.symbol ?? code).slice(0, 32),
+          decimals: 7,
+          addedAt: Date.now(),
+        };
+
+        // Trustline creation (Stellar's real "add token"): without it the
+        // account cannot hold the asset, and every payment in it fails.
+        // Skippable with createTrustline:false for list-only registration.
+        let trustlineHash: string | undefined;
+        if (payload.createTrustline !== false) {
+          const state = await vault.getState();
+          if (state !== 'unlocked') {
+            throw new ProtocolError('VAULT_LOCKED', 'Unlock the wallet to create the trustline.');
+          }
+          trustlineHash = await createStellarTrustline(code, issuer);
+        }
+
+        await addCustomToken(token);
+        return trustlineHash !== undefined ? { token, trustlineHash } : { token };
+      }
+      default:
+        throw new ProtocolError('BAD_REQUEST', 'Unsupported chain.');
+    }
+  },
+
+  'tokens.remove': async (payload) => {
+    await removeCustomToken(payload.id);
+    return { ok: true };
+  },
+
+  /**
+   * Base-unit balances of every registered token for an address. Read in the
+   * service worker (host permissions live here); one failure renders that
+   * token's balance as 0 rather than failing the whole read.
+   */
+  'tokens.balances': async (payload) => {
+    const tokens = await listCustomTokens(payload.chain);
+    const service = createChainService(payload.chain, await resolveNetworkRpcUrl(payload.chain));
+    const results = await Promise.all(
+      tokens.map(async (token) => {
+        try {
+          if (token.kind === 'erc20') {
+            return { id: token.id, balance: (await service.erc20BalanceOf!(token.address!, payload.address)).toString() };
+          }
+          if (token.kind === 'spl') {
+            const balance =
+              typeof service.tokenBalance === 'function'
+                ? await service.tokenBalance(payload.address, token.address!)
+                : 0n;
+            return { id: token.id, balance: balance.toString() };
+          }
+          const balance =
+            typeof service.getAssetBalance === 'function'
+              ? await service.getAssetBalance(payload.address, token.code!, token.issuer!)
+              : 0n;
+          return { id: token.id, balance: balance.toString() };
+        } catch {
+          return { id: token.id, balance: '0' };
+        }
+      }),
+    );
+    return results;
+  },
 };
 
 /** Decimal places used to convert human-readable token amounts to base units. */
@@ -1881,6 +2033,37 @@ async function resolveWcRequest(req: {
         `WalletConnect method ${req.request.method} is not supported yet.`
       );
   }
+}
+
+/**
+ * Creates a Stellar trustline for an issued asset — the chain's equivalent of
+ * "add token". Signs inside `vault.withAccount` (account index 0) so the key
+ * never leaves the service worker, and broadcasts to the SELECTED network
+ * (passphrase-bound). Returns the transaction hash.
+ */
+async function createStellarTrustline(code: string, issuer: string): Promise<string> {
+  const endpoints = await resolveStellarEndpoints();
+  const passphrase = await resolveStellarPassphrase();
+  return vault.withAccount('stellar', 0, async (account) => {
+    const service = createChainService('stellar', endpoints);
+    const sequence = await service.getSequence(account.address);
+    const fee = Number((await service.getBaseFee?.()) ?? 100n);
+    const signed = signStellarChangeTrust(
+      {
+        from: account.address,
+        asset: { type: 'issued', code, issuer },
+        limit: STELLAR_TRUSTLINE_NO_LIMIT,
+        sequence,
+        fee,
+        networkPassphrase: passphrase,
+      },
+      account.privateKey,
+    );
+    if (signed.from !== account.address) {
+      throw new Error('Signer address does not match the derived account.');
+    }
+    return service.sendTransaction(signed.raw);
+  });
 }
 
 /**

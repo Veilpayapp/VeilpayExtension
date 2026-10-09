@@ -1,7 +1,10 @@
 import type { Chain } from '@/core/vault/key-derivation';
 import {
+  decodeAbiString,
   erc20BalanceOfCalldata,
   erc20DecimalsCalldata,
+  erc20NameCalldata,
+  erc20SymbolCalldata,
   decodeDecimals,
   decodeUint256,
 } from './evm/erc20';
@@ -67,6 +70,10 @@ export interface ChainService {
   erc20BalanceOf?(contract: string, owner: string): Promise<bigint>;
   /** EVM: build `transfer(address,uint256)` calldata for an ERC20. */
   erc20TransferData?(to: string, amount: bigint): Uint8Array;
+  /** EVM: the ERC20's `symbol()` (metadata for the custom-token list). */
+  erc20Symbol?(contract: string): Promise<string>;
+  /** EVM: the ERC20's `name()` (metadata for the custom-token list). */
+  erc20Name?(contract: string): Promise<string>;
 
   /** Solana: decimal places of an SPL mint (from the mint account data). */
   mintDecimals?(mint: string): Promise<number>;
@@ -202,6 +209,18 @@ class EvmService implements ChainService {
   async erc20Decimals(contract: string): Promise<number> {
     const result = await this.ethCall(contract, erc20DecimalsCalldata());
     return decodeDecimals(result);
+  }
+
+  /** Reads ERC20 `symbol()` for a contract via `eth_call`. */
+  async erc20Symbol(contract: string): Promise<string> {
+    const result = await this.ethCall(contract, erc20SymbolCalldata());
+    return decodeAbiString(result);
+  }
+
+  /** Reads ERC20 `name()` for a contract via `eth_call`. */
+  async erc20Name(contract: string): Promise<string> {
+    const result = await this.ethCall(contract, erc20NameCalldata());
+    return decodeAbiString(result);
   }
 
   /** Reads ERC20 `balanceOf(owner)` for a contract via `eth_call`. */

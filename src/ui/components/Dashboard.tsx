@@ -3,6 +3,7 @@ import { Glyph } from '@/ui/components/Glyph';
 import { t } from '@/i18n';
 import { useWallet, type AccountView } from '@/ui/store/useWallet';
 import { ExportKeyModal } from '@/ui/components/ExportKeyModal';
+import { AddTokenModal } from '@/ui/components/AddTokenModal';
 import { baseToDecimal, nativeDecimalsFor } from '@/ui/lib/format';
 import type { ChainId } from '@/core/messaging/protocol';
 import type { NetworkSummary } from '@/core/messaging/protocol';
@@ -124,6 +125,9 @@ export function Dashboard({
     networks,
     selectedNetworks,
     selectNetwork,
+    customTokens,
+    tokenBalances,
+    removeToken,
   } = useWallet();
   const [txs, setTxs] = useState<IndexerTx[]>([]);
   const [txLoading, setTxLoading] = useState(false);
@@ -132,6 +136,7 @@ export function Dashboard({
   const [faucetLoading, setFaucetLoading] = useState(false);
   const [faucetMessage, setFaucetMessage] = useState<string | null>(null);
   const [networkMenuOpen, setNetworkMenuOpen] = useState(false);
+  const [addTokenChain, setAddTokenChain] = useState<ChainId | null>(null);
 
   // Store-backed selection: navigating to send/receive and back keeps the
   // user's chosen network (the previous local state reset to EVM on every
@@ -496,13 +501,26 @@ export function Dashboard({
       <section className="flex flex-col gap-2">
         <div className="flex items-center justify-between">
           <h3 className="font-display text-sm font-bold text-white">Assets</h3>
-          <button
-            type="button"
-            onClick={onImport}
-            className="font-mono text-[11px] text-accent-500 hover:underline"
-          >
-            Manage
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => onImport}
+              className="font-mono text-[11px] text-accent-500 hover:underline"
+            >
+              Manage
+            </button>
+            {/* MetaMask-style add-token: opens the chain-aware modal and the
+                token lands in the registry (and the send form's picker). */}
+            <button
+              type="button"
+              onClick={() => setAddTokenChain(activeChain)}
+              aria-label={`Add token on ${activeChain}`}
+              className="flex items-center gap-1 font-mono text-[11px] font-semibold text-accent-500 hover:underline"
+            >
+              <Glyph name="plus" className="h-3 w-3" />
+              Add token
+            </button>
+          </div>
         </div>
 
         {accounts.length === 0 ? (
@@ -516,6 +534,7 @@ export function Dashboard({
               const bal = balances[key] ?? 0n;
               const meta = metaFor(acc.chain);
               const cryptoAmt = baseToDecimal(bal, nativeDecimalsFor(acc.chain), 4);
+              const networkName = networkLabel(acc.chain, networks, selectedNetworks);
 
               return (
                 <li
@@ -528,7 +547,9 @@ export function Dashboard({
                     </div>
                     <div>
                       <div className="font-display text-sm font-bold text-white">{meta.label}</div>
-                      <div className="font-mono text-[10px] text-content-tertiary">{meta.symbol}</div>
+                      <div className="font-mono text-[10px] text-content-tertiary">
+                        {meta.symbol} · {networkName}
+                      </div>
                     </div>
                   </div>
 
@@ -567,6 +588,49 @@ export function Dashboard({
                         <Glyph name="key" className="h-3 w-3" />
                       </button>
                     </div>
+                  </div>
+                </li>
+              );
+            })}
+            {/* Custom tokens — the MetaMask-style registry, per chain, with
+                live base-unit balances from the background. */}
+            {customTokens.map((token, idx) => {
+              const acc = accounts.find((a) => a.chain === token.chain);
+              if (acc === undefined) return null;
+              const bal = tokenBalances[token.id] ?? 0n;
+              const cryptoAmt = baseToDecimal(bal, token.decimals, 4);
+              return (
+                <li
+                  key={token.id}
+                  style={{ animationDelay: `${Math.min(idx * 40, 200)}ms` }}
+                  className="flex animate-fade-in-up items-center justify-between rounded-xl border border-surface-700/60 bg-surface-800/60 p-3 transition-colors hover:border-surface-600"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-accent-500/30 bg-surface-900">
+                      <Glyph name="token" className="h-4 w-4 text-accent-500" />
+                    </div>
+                    <div>
+                      <div className="font-display text-sm font-bold text-white">{token.symbol}</div>
+                      <div className="max-w-[11rem] truncate font-mono text-[10px] text-content-tertiary">
+                        {token.kind === 'stellar-issued'
+                          ? `${token.code} · ${token.issuer!.slice(0, 8)}…`
+                          : (token.address ?? '').slice(0, 12) + '…'}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className="text-right font-mono text-xs font-bold text-white">
+                      {showBalance ? `${cryptoAmt} ${token.symbol}` : '••••••••'}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void removeToken(token.id)}
+                      aria-label={`Remove ${token.symbol}`}
+                      title={`Remove ${token.symbol}`}
+                      className="rounded-lg bg-surface-700 p-1 text-content-tertiary hover:bg-surface-600 hover:text-danger"
+                    >
+                      <Glyph name="x" className="h-3 w-3" />
+                    </button>
                   </div>
                 </li>
               );
@@ -653,6 +717,11 @@ export function Dashboard({
       {/* Export Key Modal */}
       {exportAccount !== null && (
         <ExportKeyModal account={exportAccount} onClose={() => setExportAccount(null)} />
+      )}
+
+      {/* Add Token Modal — chain-aware (ERC-20 / SPL mint / Stellar trustline) */}
+      {addTokenChain !== null && (
+        <AddTokenModal chain={addTokenChain} onClose={() => setAddTokenChain(null)} />
       )}
     </div>
   );

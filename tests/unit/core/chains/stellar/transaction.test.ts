@@ -3,7 +3,9 @@ import { ed25519 } from '@noble/curves/ed25519';
 import { sha256 } from '@noble/hashes/sha256';
 import {
   encodeStellarAddress,
+  signStellarChangeTrust,
   signStellarPayment,
+  STELLAR_TRUSTLINE_NO_LIMIT,
 } from '@/core/chains/stellar/transaction';
 
 // Known test keys (ed25519, 32 bytes).
@@ -418,5 +420,112 @@ describe('Stellar MEMO_TEXT encoding', () => {
     const c = signStellarPayment({ ...base, memo: 'two' }, PRIVATE_KEY);
     expect(a.raw).toBe(b.raw);
     expect(a.raw).not.toBe(c.raw);
+  });
+});
+
+describe('Stellar change-trust serialization (add-token trustline)', () => {
+  /** Extracts the raw 64-byte signature from a v1 envelope. */
+  function extractSig(raw: string): Uint8Array {
+    const envelope = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0));
+    // Trailing layout: [uint32 sig count][hint 4][uint32 len 64][64 bytes]
+    return envelope.slice(envelope.length - 64);
+  }
+
+  it('signs a trustline envelope whose signature verifies', () => {
+    const publicKey = ed25519.getPublicKey(PRIVATE_KEY);
+    const fromAddress = encodeStellarAddress(publicKey);
+
+    const result = signStellarChangeTrust(
+      {
+        from: fromAddress,
+        asset: { type: 'issued', code: 'USDC', issuer: DEST_ADDRESS },
+        limit: STELLAR_TRUSTLINE_NO_LIMIT,
+        sequence: 120n,
+        fee: 100,
+      },
+      PRIVATE_KEY,
+    );
+
+    expect(() => atob(result.raw)).not.toThrow();
+    expect(result.from).toBe(fromAddress);
+    expect(result.signingHash).toMatch(/^[0-9a-f]{64}$/);
+
+    // The embedded signature verifies against the signing hash.
+    const sig = extractSig(result.raw);
+    const signingHashBytes = Uint8Array.from(
+      result.signingHash.match(/.{2}/g)!.map((h) => parseInt(h, 16)),
+    );
+    expect(ed25519.verify(sig, signingHashBytes, publicKey)).toBe(true);
+  });
+
+  it('encodes the CHANGE_TRUST operation with the asset and limit', () => {
+    const result = signStellarChangeTrust(
+      {
+        from: SOURCE_ADDRESS,
+        asset: { type: 'issued', code: 'USDC', issuer: DEST_ADDRESS },
+        limit: STELLAR_TRUSTLINE_NO_LIMIT,
+        sequence: 120n,
+        fee: 100,
+      },
+      PRIVATE_KEY,
+    );
+
+    const raw = Uint8Array.from(atob(result.raw), (c) => c.charCodeAt(0));
+    // Envelope layout: [uint32 2 (envelope disc)] then the Transaction XDR:
+    // [pubkey 36][fee 4][seq 8][precond 4][memo 4][ops…][ext 4].
+    // Operations: uint32 count=1, then each op: [source ptr 4][body…].
+    // Body: uint32 type 7 (CHANGE_TRUST) + Asset + int64 limit.
+    const opsStart = 4 + 36 + 4 + 8 + 4 + 4; // envelope disc + up to and incl. memo
+    expect(raw.slice(opsStart, opsStart + 4)).toEqual(new Uint8Array([0, 0, 0, 1])); // 1 op
+    const opStart = opsStart + 4;
+    expect(raw.slice(opStart, opStart + 4)).toEqual(new Uint8Array([0, 0, 0, 0])); // null source
+    const bodyStart = opStart + 4;
+    expect(raw.slice(bodyStart, bodyStart + 4)).toEqual(new Uint8Array([0, 0, 0, 7])); // CHANGE_TRUST
+    // Asset: CREDIT_ALPHANUM4 (1) + code[4] "USDC" + pubkey(0+32).
+    const assetStart = bodyStart + 4;
+    expect(raw.slice(assetStart, assetStart + 4)).toEqual(new Uint8Array([0, 0, 0, 1]));
+    expect(new TextDecoder().decode(raw.slice(assetStart + 4, assetStart + 8))).toBe('USDC');
+    // Limit: 2^63-1 as int64 big-endian = 0x7fffffffffffffff.
+    const limitStart = assetStart + 4 + 4 + 36;
+    expect(Array.from(raw.slice(limitStart, limitStart + 8))).toEqual([
+      0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    ]);
+  });
+
+  it('rejects a native trustline (nothing to trust)', () => {
+    expect(() =>
+      signStellarChangeTrust(
+        {
+          from: SOURCE_ADDRESS,
+          asset: { type: 'native' },
+          limit: STELLAR_TRUSTLINE_NO_LIMIT,
+          sequence: 1n,
+          fee: 100,
+        },
+        PRIVATE_KEY,
+      ),
+    ).toThrow('issued asset');
+  });
+
+  it('binds the trustline to the selected network passphrase', () => {
+    const base = {
+      from: SOURCE_ADDRESS,
+      asset: { type: 'issued' as const, code: 'USDC', issuer: DEST_ADDRESS },
+      limit: STELLAR_TRUSTLINE_NO_LIMIT,
+      sequence: 120n,
+      fee: 100,
+    };
+    const testnet = signStellarChangeTrust(
+      { ...base, networkPassphrase: 'Test SDF Network ; September 2015' },
+      PRIVATE_KEY,
+    );
+    const mainnet = signStellarChangeTrust(
+      { ...base, networkPassphrase: 'Public Global Stellar Network ; September 2015' },
+      PRIVATE_KEY,
+    );
+
+    // A different passphrase produces a different signing hash — the
+    // trustline is network-bound, exactly like a payment.
+    expect(testnet.signingHash).not.toBe(mainnet.signingHash);
   });
 });

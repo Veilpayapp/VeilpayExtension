@@ -42,11 +42,26 @@ export interface FaucetAirdropResponse {
   error?: { message?: string };
 }
 
+/**
+ * Historical default faucet networks, used only when the caller passes none
+ * (tests; the background always passes the selected network): devnet for
+ * Solana, testnet for Stellar, and any-EVM-testnet (the URL is opened in a
+ * browser regardless).
+ */
+const DEFAULT_FAUCET_NETWORK_ID: Record<ChainId, string> = {
+  evm: 'evm:sepolia',
+  solana: 'solana:devnet',
+  stellar: 'stellar:testnet',
+};
+
 /** Requests testnet funds for a chain address (works from the SW). */
 export async function requestTestnetFaucet(
   chain: ChainId,
   address: string,
-  network: { id: string; faucet: boolean } = { id: `${chain}:testnet`, faucet: true },
+  network: { id: string; faucet: boolean } = {
+    id: DEFAULT_FAUCET_NETWORK_ID[chain],
+    faucet: true,
+  },
 ): Promise<FaucetResult> {
   // Mainnets (and custom RPCs classified without a faucet) refuse: there is
   // no faucet for real funds, and pretending otherwise would be a fake

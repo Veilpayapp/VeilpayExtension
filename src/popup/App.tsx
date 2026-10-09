@@ -1191,11 +1191,22 @@ function SendForm({
   const feeSymbol =
     account.chain === 'evm' ? 'Gwei' : account.chain === 'solana' ? 'lamports' : 'stroops';
 
-  const { balances, networks, selectedNetworks } = useWallet();
+  const { balances, networks, selectedNetworks, customTokens } = useWallet();
   // The live network name for this account's chain — mainnet or testnet,
   // whichever is selected. Receipts and headers must never hardcode TESTNET.
   const networkName = networkLabel(account.chain, networks, selectedNetworks).toUpperCase();
   const [addressBookOpen, setAddressBookOpen] = useState(false);
+  const [tokenMenuOpen, setTokenMenuOpen] = useState(false);
+  /** Tokens registered for THIS chain, from the add-token registry. */
+  const chainTokens = customTokens.filter((tok) => tok.chain === account.chain);
+
+  /** Whether the current selection is a manual, not-yet-identified token. */
+  const isManualToken = isStellar
+    ? sendAsset?.type === 'issued' &&
+      (sendAsset.code.length === 0 || sendAsset.issuer.length === 0)
+    : (sendToken?.kind === 'erc20' || sendToken?.kind === 'spl') &&
+      ((sendToken.kind === 'erc20' && (sendToken.address?.length ?? 0) === 0) ||
+        (sendToken.kind === 'spl' && (sendToken.mint?.length ?? 0) === 0));
 
   // Normalize selection into TokenInput
   const resolvedToken: TokenInputType | undefined = useMemo<TokenInputType | undefined>(
@@ -1208,11 +1219,29 @@ function SendForm({
     [isStellar, sendAsset, sendToken],
   );
 
+  /** Whether the picker currently shows the chain's native asset. */
+  const isNativeSelection =
+    sendAsset === undefined || sendAsset.type === 'native'
+      ? sendToken === undefined || sendToken.kind === 'native'
+      : false;
+
+  // Label: the registered token's symbol when a registry token is selected,
+  // the asset code for Stellar issued assets, else the native symbol.
   const assetLabel =
     sendAsset?.type === 'issued'
       ? sendAsset.code
       : sendToken?.kind === 'erc20' || sendToken?.kind === 'spl'
-        ? 'Token'
+        ? (() => {
+            const id =
+              sendToken.kind === 'erc20'
+                ? sendToken.address.toLowerCase()
+                : sendToken.mint;
+            return (
+              customTokens.find(
+                (tok) => tok.address !== undefined && tok.address.toLowerCase() === id,
+              )?.symbol ?? 'Token'
+            );
+          })()
         : nativeSymbol;
 
   // Auto-estimate
@@ -1434,61 +1463,215 @@ function SendForm({
           </div>
         </div>
 
-        {/* Asset / Token selection for non-Stellar or multi-asset */}
-        {isStellar && (
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => { onAssetChange({ type: 'native' }); onClearError(); }}
-              className={`flex-1 rounded-lg border py-1.5 font-mono text-xs ${
-                sendAsset === undefined || sendAsset.type === 'native'
-                  ? 'border-accent-500 bg-accent-500/15 text-accent-400 font-semibold'
-                  : 'border-surface-700 bg-surface-800 text-content-tertiary'
-              }`}
-            >
-              Native (XLM)
-            </button>
-            <button
-              type="button"
-              onClick={() => { onAssetChange({ type: 'issued', code: 'USDC', issuer: '' }); onClearError(); }}
-              className={`flex-1 rounded-lg border py-1.5 font-mono text-xs ${
-                sendAsset?.type === 'issued'
-                  ? 'border-accent-500 bg-accent-500/15 text-accent-400 font-semibold'
-                  : 'border-surface-700 bg-surface-800 text-content-tertiary'
-              }`}
-            >
-              Issued token
-            </button>
-          </div>
-        )}
+        {/* Asset / Token selection: the registered custom tokens (from
+            "Add token") plus native, with a manual fallback for one-off
+            sends. Selecting a registered token fills its address/issuer —
+            no dead-end empty token. */}
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setTokenMenuOpen((v) => !v)}
+            aria-expanded={tokenMenuOpen}
+            aria-label={`Select token, current ${assetLabel}`}
+            className="flex w-full items-center justify-between rounded-xl border border-surface-700/80 bg-surface-800/80 px-3 py-2.5 text-left transition-colors hover:border-surface-600 active:scale-[0.99]"
+          >
+            <span className="flex items-center gap-2">
+              <Glyph name="token" className="h-4 w-4 text-accent-500" />
+              <span className="font-mono text-xs font-semibold text-content-primary">
+                {assetLabel}
+              </span>
+              <span className="font-mono text-[10px] text-content-tertiary">
+                {isNativeSelection ? `Native ${nativeSymbol}` : 'Token'}
+              </span>
+            </span>
+            <Glyph
+              name="chevron-down"
+              className={`h-3.5 w-3.5 text-accent-500 transition-transform duration-base ease-smooth ${tokenMenuOpen ? 'rotate-180' : ''}`}
+            />
+          </button>
 
-        {!isStellar && (
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => { onTokenChange(undefined); onClearError(); }}
-              className={`flex-1 rounded-lg border py-1.5 font-mono text-xs ${
-                sendToken === undefined || sendToken.kind === 'native'
-                  ? 'border-accent-500 bg-accent-500/15 text-accent-400 font-semibold'
-                  : 'border-surface-700 bg-surface-800 text-content-tertiary'
-              }`}
+          {tokenMenuOpen && (
+            <div
+              className="absolute left-0 right-0 top-full z-30 mt-1 max-h-56 overflow-y-auto rounded-xl border border-surface-600 bg-surface-800 p-1.5 shadow-raised animate-pop-in"
+              role="menu"
+              aria-label="Tokens"
             >
-              Native ({nativeSymbol})
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                onTokenChange(account.chain === 'evm' ? { kind: 'erc20', address: '' } : { kind: 'spl', mint: '' });
-                onClearError();
-              }}
-              className={`flex-1 rounded-lg border py-1.5 font-mono text-xs ${
-                sendToken?.kind === 'erc20' || sendToken?.kind === 'spl'
-                  ? 'border-accent-500 bg-accent-500/15 text-accent-400 font-semibold'
-                  : 'border-surface-700 bg-surface-800 text-content-tertiary'
-              }`}
-            >
-              Token
-            </button>
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked={isNativeSelection}
+                onClick={() => {
+                  onAssetChange(undefined);
+                  onTokenChange(undefined);
+                  onClearError();
+                  setTokenMenuOpen(false);
+                }}
+                className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-xs font-mono transition-colors ${
+                  isNativeSelection
+                    ? 'bg-accent-500/15 font-semibold text-accent-400'
+                    : 'text-content-secondary hover:bg-surface-700'
+                }`}
+              >
+                <span>Native ({nativeSymbol})</span>
+                <span className="text-[10px] text-content-tertiary">native</span>
+              </button>
+
+              {chainTokens.map((tok) => {
+                const selected =
+                  (tok.kind === 'erc20' && sendToken?.kind === 'erc20' && sendToken.address === tok.address) ||
+                  (tok.kind === 'spl' && sendToken?.kind === 'spl' && sendToken.mint === tok.address) ||
+                  (tok.kind === 'stellar-issued' &&
+                    (sendToken?.kind === 'stellar-issued' || sendAsset?.type === 'issued') &&
+                    sendAsset?.type === 'issued' &&
+                    sendAsset.code === tok.code &&
+                    sendAsset.issuer === tok.issuer);
+                return (
+                  <button
+                    key={tok.id}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={selected}
+                    onClick={() => {
+                      if (tok.kind === 'stellar-issued') {
+                        onAssetChange({ type: 'issued', code: tok.code!, issuer: tok.issuer! });
+                        onTokenChange({ kind: 'stellar-issued', code: tok.code!, issuer: tok.issuer! });
+                      } else if (tok.kind === 'erc20') {
+                        onTokenChange({ kind: 'erc20', address: tok.address! });
+                      } else {
+                        onTokenChange({ kind: 'spl', mint: tok.address! });
+                      }
+                      onClearError();
+                      setTokenMenuOpen(false);
+                    }}
+                    className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-xs font-mono transition-colors ${
+                      selected
+                        ? 'bg-accent-500/15 font-semibold text-accent-400'
+                        : 'text-content-secondary hover:bg-surface-700'
+                    }`}
+                  >
+                    <span>{tok.symbol}</span>
+                    <span className="max-w-[9rem] truncate text-[10px] text-content-tertiary">
+                      {tok.kind === 'stellar-issued'
+                        ? `${tok.code} · ${tok.issuer!.slice(0, 8)}…`
+                        : `${(tok.address ?? '').slice(0, 10)}…`}
+                    </span>
+                  </button>
+                );
+              })}
+
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked={isManualToken}
+                onClick={() => {
+                  // Stellar flows through the legacy `asset` field (the
+                  // normalized token is derived from it), so the manual
+                  // selection seeds an empty issued asset there.
+                  if (account.chain === 'stellar') {
+                    onAssetChange({ type: 'issued', code: '', issuer: '' });
+                    onTokenChange(undefined);
+                  } else {
+                    onTokenChange(
+                      account.chain === 'evm'
+                        ? { kind: 'erc20', address: '' }
+                        : { kind: 'spl', mint: '' },
+                    );
+                  }
+                  onClearError();
+                  setTokenMenuOpen(false);
+                }}
+                className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-xs font-mono text-content-secondary transition-colors hover:bg-surface-700"
+              >
+                <span>Other token…</span>
+                <span className="text-[10px] text-content-tertiary">manual</span>
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Manual token entry — appears only for the "Other token…" selection:
+            EVM/Solana take a contract/mint address, Stellar a code + issuer. */}
+        {isManualToken && (
+          <div className="flex flex-col gap-2 animate-fade-in-up">
+            {isStellar ? (
+              <>
+                <div>
+                  <label
+                    htmlFor="manual-token-code"
+                    className="block font-mono text-[10px] font-semibold tracking-wider text-content-tertiary uppercase mb-1"
+                  >
+                    ASSET CODE
+                  </label>
+                  <input
+                    id="manual-token-code"
+                    type="text"
+                    placeholder="USDC"
+                    maxLength={12}
+                    value={sendAsset?.type === 'issued' ? sendAsset.code : ''}
+                    onChange={(e) =>
+                      onAssetChange({
+                        type: 'issued',
+                        code: e.target.value,
+                        issuer: sendAsset?.type === 'issued' ? sendAsset.issuer : '',
+                      })
+                    }
+                    disabled={isLoading || sendStatus === 'sending'}
+                    className="w-full rounded-xl border border-surface-700 bg-surface-800/90 px-3 py-2 font-mono text-xs text-content-primary placeholder:text-content-tertiary focus:border-accent-500 outline-none"
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="manual-token-issuer"
+                    className="block font-mono text-[10px] font-semibold tracking-wider text-content-tertiary uppercase mb-1"
+                  >
+                    ISSUER ADDRESS
+                  </label>
+                  <input
+                    id="manual-token-issuer"
+                    type="text"
+                    placeholder="G…"
+                    value={sendAsset?.type === 'issued' ? sendAsset.issuer : ''}
+                    onChange={(e) =>
+                      onAssetChange({
+                        type: 'issued',
+                        code: sendAsset?.type === 'issued' ? sendAsset.code : '',
+                        issuer: e.target.value,
+                      })
+                    }
+                    disabled={isLoading || sendStatus === 'sending'}
+                    className="w-full rounded-xl border border-surface-700 bg-surface-800/90 px-3 py-2 font-mono text-xs text-content-primary placeholder:text-content-tertiary focus:border-accent-500 outline-none"
+                  />
+                </div>
+              </>
+            ) : (
+              <div>
+                <label
+                  htmlFor="manual-token-address"
+                  className="block font-mono text-[10px] font-semibold tracking-wider text-content-tertiary uppercase mb-1"
+                >
+                  {account.chain === 'evm' ? 'ERC-20 CONTRACT ADDRESS' : 'SPL MINT ADDRESS'}
+                </label>
+                <input
+                  id="manual-token-address"
+                  type="text"
+                  placeholder={account.chain === 'evm' ? '0x…' : 'Base58 mint'}
+                  value={sendToken?.kind === 'erc20' ? sendToken.address : sendToken?.kind === 'spl' ? sendToken.mint : ''}
+                  onChange={(e) =>
+                    onTokenChange(
+                      account.chain === 'evm'
+                        ? { kind: 'erc20', address: e.target.value }
+                        : { kind: 'spl', mint: e.target.value },
+                    )
+                  }
+                  disabled={isLoading || sendStatus === 'sending'}
+                  className="w-full rounded-xl border border-surface-700 bg-surface-800/90 px-3 py-2 font-mono text-xs text-content-primary placeholder:text-content-tertiary focus:border-accent-500 outline-none"
+                />
+              </div>
+            )}
+            <p className="font-mono text-[10px] text-content-tertiary">
+              Tip: add the token once with "Add token" and it appears in this
+              picker every time.
+            </p>
           </div>
         )}
 

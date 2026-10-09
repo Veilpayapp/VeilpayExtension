@@ -42,7 +42,8 @@ export type GlyphName =
   | 'eye'
   | 'eye-off'
   | 'lock'
-  | 'home';
+  | 'home'
+  | 'token';
 
 const PATHS: Record<GlyphName, JSX.Element> = {
   copy: (
@@ -67,6 +68,12 @@ const PATHS: Record<GlyphName, JSX.Element> = {
     <>
       <path d="M20 12a8 8 0 1 1-2.34-5.66" />
       <path d="M20 3v4h-4" />
+    </>
+  ),
+  token: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M9 8h4a2.2 2.2 0 0 1 0 4.4H9V8zm0 4.4h4.6a2.2 2.2 0 0 1 0 4.4H9v-4.4zm2.6-6v11.6" />
     </>
   ),
   qr: (

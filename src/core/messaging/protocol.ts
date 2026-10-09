@@ -100,6 +100,10 @@ export const RequestKind = z.enum([
   'networks.select',
   'networks.custom.add',
   'networks.custom.remove',
+  'tokens.list',
+  'tokens.add',
+  'tokens.remove',
+  'tokens.balances',
 ]);
 export type RequestKind = z.infer<typeof RequestKind>;
 
@@ -181,6 +185,11 @@ export const PRIVILEGED_KINDS: readonly RequestKind[] = [
   'networks.select',
   'networks.custom.add',
   'networks.custom.remove',
+  // Adding a token can broadcast a Stellar trustline signed with the vault
+  // key and records standing metadata the send path trusts; only our own
+  // surfaces may do it, never a page.
+  'tokens.add',
+  'tokens.remove',
 ] as const;
 
 export function isPrivilegedKind(kind: RequestKind): boolean {
@@ -912,6 +921,72 @@ export const NetworksCustomRemoveRequest = baseEnvelope.extend({
   }),
 });
 
+// ── Custom tokens (MetaMask-style add-token) ───────────────────────────────
+
+/** A registered custom token, as it crosses the bus. */
+export const CustomToken = z.object({
+  id: z.string().min(1),
+  chain: ChainId,
+  kind: z.enum(['erc20', 'spl', 'stellar-issued']),
+  address: z.string().optional(),
+  code: z.string().optional(),
+  issuer: z.string().optional(),
+  symbol: z.string().min(1).max(32),
+  name: z.string().max(128).optional(),
+  decimals: z.number().int().min(0).max(255),
+  addedAt: z.number().int().nonnegative(),
+});
+export type CustomToken = z.infer<typeof CustomToken>;
+
+export const TokensListRequest = baseEnvelope.extend({
+  kind: z.literal('tokens.list'),
+  payload: z.object({
+    chain: ChainId.optional(),
+  }),
+});
+
+/**
+ * Registers a custom token.
+ *
+ * - EVM: the contract's `decimals()`/`symbol()` are read from the chain and
+ *   override any caller-supplied values;
+ * - Solana: the mint's decimals byte is read from the chain;
+ * - Stellar: an issued asset (code + issuer). `createTrustline` (default
+ *   true) broadcasts a CHANGE_TRUST op so the account can actually hold it.
+ */
+export const TokensAddRequest = baseEnvelope.extend({
+  kind: z.literal('tokens.add'),
+  payload: z.object({
+    chain: ChainId,
+    /** EVM contract address / Solana mint. */
+    contract: z.string().optional(),
+    /** Stellar asset code. */
+    code: z.string().regex(/^[A-Za-z0-9]{1,12}$/).optional(),
+    /** Stellar issuer strkey. */
+    issuer: z.string().regex(/^G[A-Z2-7]{55}$/).optional(),
+    /** Optional display overrides when the chain cannot supply them. */
+    symbol: z.string().min(1).max(32).optional(),
+    name: z.string().max(128).optional(),
+    /** Stellar: broadcast the trustline (default true). */
+    createTrustline: z.boolean().optional(),
+  }),
+});
+
+export const TokensRemoveRequest = baseEnvelope.extend({
+  kind: z.literal('tokens.remove'),
+  payload: z.object({
+    id: z.string().min(1),
+  }),
+});
+
+export const TokensBalancesRequest = baseEnvelope.extend({
+  kind: z.literal('tokens.balances'),
+  payload: z.object({
+    chain: ChainId,
+    address: z.string().min(1),
+  }),
+});
+
 export const Request = z.discriminatedUnion('kind', [
   PingRequest,
   VaultStatusRequest,
@@ -977,6 +1052,10 @@ export const Request = z.discriminatedUnion('kind', [
   NetworksSelectRequest,
   NetworksCustomAddRequest,
   NetworksCustomRemoveRequest,
+  TokensListRequest,
+  TokensAddRequest,
+  TokensRemoveRequest,
+  TokensBalancesRequest,
 ]);
 export type Request = z.infer<typeof Request>;
 
@@ -1302,6 +1381,13 @@ export interface ResponseData {
   /** Whether the custom network was added. False on a duplicate name. */
   'networks.custom.add': { ok: boolean };
   'networks.custom.remove': { ok: boolean };
+  /** Registered custom tokens, optionally filtered to a chain. */
+  'tokens.list': CustomToken[];
+  /** The registered token, plus the trustline tx hash when one was created. */
+  'tokens.add': { token: CustomToken; trustlineHash?: string };
+  'tokens.remove': { ok: boolean };
+  /** Base-unit balances of every registered token for one address. */
+  'tokens.balances': Array<{ id: string; balance: string }>;
 }
 
 export function newId(): string {
