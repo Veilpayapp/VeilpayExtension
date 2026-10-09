@@ -1,15 +1,13 @@
 /**
  * EIP-1193 chain-switching helpers.
  *
- * The wallet is testnet-only and currently supports exactly one EVM chain
- * (Sepolia). `wallet_switchEthereumChain` therefore either confirms the
- * supported chain or fails with EIP-1193 error 4902 ("Unrecognized chain"),
- * which is the signal dapps use to prompt for `wallet_addEthereumChain` — that
- * method is unsupported here and fails with 4200.
+ * The wallet supports the EVM networks in the registry (mainnets and
+ * testnets — see `src/core/networks`). `wallet_switchEthereumChain` persists
+ * the requested registry network when one matches the chain id, or fails with
+ * EIP-1193 error 4902 ("Unrecognized chain") — the signal dapps use to prompt
+ * for `wallet_addEthereumChain`, which is unsupported here and fails with
+ * 4200.
  */
-
-/** The only EVM chain this wallet supports (Sepolia). */
-export const SUPPORTED_EVM_CHAIN_ID = '0xaa36a7';
 
 /** EIP-1193 error codes (https://eips.ethereum.org/EIPS/eip-1193#errors). */
 export const EIP1193 = {

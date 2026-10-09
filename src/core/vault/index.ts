@@ -16,9 +16,15 @@ import { notifyLockListeners } from './lock-hooks';
 /**
  * Vault lifecycle, session state, and account derivation.
  *
- * The decrypted mnemonic is held only in this module's closure, only while
- * unlocked, and is never persisted, messaged, or logged. A service-worker
- * restart therefore relocks the wallet — which is the intended behaviour.
+ * The decrypted mnemonic is held in this module's closure while unlocked and
+ * is additionally mirrored into `chrome.storage.session` — Chrome's
+ * in-memory, trusted-contexts-only store, wiped when the browser closes and
+ * unreadable from content scripts. Without that mirror, an MV3
+ * service-worker eviction (which Chrome performs ~30s after the popup
+ * closes) relocks the wallet seconds into a 15-minute idle window, and the
+ * window the user was promised never actually exists. The mirror preserves
+ * the ORIGINAL session timestamps, so an eviction grants no extra unlock
+ * time; it only prevents losing time the user already had.
  *
  * `SessionService` is the single authority on whether the session has expired.
  * This module does not keep a second deadline, because two clocks for one
@@ -35,6 +41,140 @@ const MIN_PASSPHRASE_LENGTH = 10;
 let mnemonicBytes: Uint8Array | null = null;
 let sessionService: SessionService | null = null;
 let idleMs = DEFAULT_IDLE_MS;
+/** One restore attempt per module instance (per service-worker wake). */
+let restoreAttempted = false;
+let restoreInFlight: Promise<void> | null = null;
+
+const SESSION_STORE_KEY = 'vault:session';
+
+interface PersistedSession {
+  mnemonic: string;
+  startedAt: number;
+  lastActivityAt: number;
+  idleMs: number;
+}
+
+/**
+ * `chrome.storage.session` accessor, or null outside the extension's
+ * service worker (tests, non-Chrome hosts). storage.session is in-memory,
+ * never touches disk, is cleared on browser exit, and is only readable from
+ * trusted extension contexts — the closest thing to this module's closure
+ * that survives an MV3 worker eviction.
+ */
+function sessionStore(): {
+  get(key: string): Promise<Record<string, unknown>>;
+  set(items: Record<string, unknown>): Promise<void>;
+  remove(key: string): Promise<void>;
+} | null {
+  const store = globalThis.chrome?.storage?.session;
+  if (
+    typeof store?.get !== 'function' ||
+    typeof store?.set !== 'function' ||
+    typeof store?.remove !== 'function'
+  ) {
+    return null;
+  }
+  return store as unknown as {
+    get(key: string): Promise<Record<string, unknown>>;
+    set(items: Record<string, unknown>): Promise<void>;
+    remove(key: string): Promise<void>;
+  };
+}
+
+function isPersistedSession(value: unknown): value is PersistedSession {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.mnemonic === 'string' &&
+    candidate.mnemonic.length > 0 &&
+    typeof candidate.startedAt === 'number' &&
+    typeof candidate.lastActivityAt === 'number' &&
+    typeof candidate.idleMs === 'number'
+  );
+}
+
+/** Reads the live session's timestamps for the persistence snapshot. */
+function sessionTimestamps(): { startedAt: number; lastActivityAt: number } | null {
+  if (sessionService === null) return null;
+  return {
+    startedAt: sessionService.sessionStartedAt,
+    lastActivityAt: sessionService.sessionLastActivityAt,
+  };
+}
+
+/** Mirrors the live session into storage.session (best effort, non-fatal). */
+function persistSession(): void {
+  const timestamps = sessionTimestamps();
+  if (sessionService === null || mnemonicBytes === null || timestamps === null) return;
+  const store = sessionStore();
+  if (store === null) return;
+  const snapshot: PersistedSession = {
+    mnemonic: new TextDecoder().decode(mnemonicBytes),
+    startedAt: timestamps.startedAt,
+    lastActivityAt: timestamps.lastActivityAt,
+    idleMs,
+  };
+  void store.set({ [SESSION_STORE_KEY]: snapshot }).catch(() => undefined);
+}
+
+/** Best-effort mirror removal; stale rows also fail restore validation. */
+function clearPersistedSession(): void {
+  const store = sessionStore();
+  if (store === null) return;
+  void store.remove(SESSION_STORE_KEY).catch(() => undefined);
+}
+
+/**
+ * Restores a persisted session after a service-worker eviction.
+ *
+ * Runs once per module instance (per worker wake), before any caller sees
+ * state. The restored SessionService keeps the original timestamps, so the
+ * idle window continues where it left off; an already-expired (or malformed,
+ * or vault-less) row is discarded instead of revived.
+ */
+async function ensureSessionRestored(): Promise<void> {
+  if (restoreAttempted && restoreInFlight === null) return;
+  if (restoreInFlight !== null) return restoreInFlight;
+  restoreAttempted = true;
+  restoreInFlight = (async () => {
+    if (mnemonicBytes !== null) return; // already unlocked in this instance
+    const store = sessionStore();
+    if (store === null) return;
+    try {
+      const stored = await store.get(SESSION_STORE_KEY);
+      const entry = stored?.[SESSION_STORE_KEY];
+      if (!isPersistedSession(entry)) {
+        if (entry !== undefined) {
+          await store.remove(SESSION_STORE_KEY).catch(() => undefined);
+        }
+        return;
+      }
+      // Reconstruct with the ORIGINAL timestamps; if the window has already
+      // elapsed, SessionService reports inactive and the vault stays locked.
+      const restored = new SessionService(entry.idleMs, Date.now(), {
+        startedAt: entry.startedAt,
+        lastActivityAt: entry.lastActivityAt,
+      });
+      if (!restored.isActive()) {
+        await store.remove(SESSION_STORE_KEY).catch(() => undefined);
+        return;
+      }
+      if (!(await vaultExists())) {
+        // The vault was reset while a session row lingered — drop the row.
+        await store.remove(SESSION_STORE_KEY).catch(() => undefined);
+        return;
+      }
+      mnemonicBytes = new TextEncoder().encode(entry.mnemonic);
+      sessionService = restored;
+      idleMs = entry.idleMs;
+    } catch {
+      // Unreadable storage — treat as no persisted session.
+    } finally {
+      restoreInFlight = null;
+    }
+  })();
+  return restoreInFlight;
+}
 
 export class WeakPassphrase extends Error {
   constructor(message: string) {
@@ -94,6 +234,7 @@ function enforceExpiry(): void {
 }
 
 export async function getState(): Promise<VaultState> {
+  await ensureSessionRestored();
   enforceExpiry();
   if (mnemonicBytes !== null) return 'unlocked';
   return (await vaultExists()) ? 'locked' : 'uninitialized';
@@ -108,6 +249,7 @@ export function unlockedUntil(): number | null {
 function beginSession(bytes: Uint8Array): void {
   mnemonicBytes = bytes;
   sessionService = new SessionService(idleMs);
+  persistSession();
 }
 
 /** Creates the vault and leaves it unlocked. */
@@ -149,6 +291,7 @@ export function lock(): void {
   }
   sessionService?.stop();
   sessionService = null;
+  clearPersistedSession();
   if (wasUnlocked) notifyLockListeners();
 }
 
@@ -161,6 +304,7 @@ export function lock(): void {
 export function touch(): void {
   enforceExpiry();
   sessionService?.recordActivity();
+  persistSession();
 }
 
 export function setIdleTimeout(ms: number): void {
@@ -169,6 +313,7 @@ export function setIdleTimeout(ms: number): void {
   }
   idleMs = ms;
   sessionService?.setIdleTimeout(ms);
+  persistSession();
 }
 
 /**
@@ -197,6 +342,10 @@ async function withMnemonicInternal<T>(
   fn: (mnemonic: string) => Promise<T>,
   recordActivity: boolean,
 ): Promise<T> {
+  // A freshly-woken service worker has an empty closure; the persisted
+  // session must be revived before "locked" can be reported, or a valid
+  // 15-minute session would break on the first message after an eviction.
+  await ensureSessionRestored();
   enforceExpiry();
   if (mnemonicBytes === null) {
     throw new VaultLocked();

@@ -5,6 +5,11 @@ import { ChromeStorageAdapter } from './storage';
 import { setPendingWcProposal, clearPendingWcProposal, getPendingWcProposal } from './proposal-store';
 import { setPendingWcRequest, clearPendingWcRequestForTopic } from './request-store';
 import { openApprovalSurface } from '@/background/approval-surface';
+import {
+  findEvmNetworkByChainId,
+  resolveEvmChainId,
+  setSelectedNetworkId,
+} from '@/core/networks';
 
 /**
  * WalletConnect client singleton.
@@ -101,6 +106,12 @@ export class WalletConnectClient {
 
   /**
    * Approve a session proposal with selected accounts.
+   *
+   * The session binds to the dapp's requested EVM chains when the wallet's
+   * registry carries them (the dapp's first supported chain becomes the
+   * wallet's SELECTED EVM network, so balances, signing, and the dapp's
+   * requests all agree on one chain); otherwise the currently selected
+   * network is offered and the dapp decides whether that is acceptable.
    */
   async approveProposal(proposalId: number, accounts: string[]): Promise<void> {
     if (!this.client) throw new Error('WalletConnect client not initialized');
@@ -114,11 +125,26 @@ export class WalletConnectClient {
       throw new Error('No EVM accounts selected');
     }
 
-    // The wallet runs on Sepolia only, so every connected account is an
-    // `eip155:11155111` account. EVM-only by design for now; Solana/Stellar
-    // support would add `solana:` / `stellar:` namespaces later.
+    // Resolve the chain the session will use: the dapp's first requested
+    // eip155 chain that this wallet's registry supports, else the current
+    // selection. Persist the choice so `eth.chainId` and sends follow it.
+    const requestedChains =
+      proposal.requiredNamespaces.eip155?.chains ??
+      proposal.optionalNamespaces?.eip155?.chains ??
+      [];
+    let chainId = (await resolveEvmChainId()).toString();
+    for (const reference of requestedChains) {
+      const parsed = Number.parseInt(reference.split(':')[1] ?? '', 10);
+      const network =
+        Number.isInteger(parsed) ? findEvmNetworkByChainId(parsed) : undefined;
+      if (network !== undefined) {
+        await setSelectedNetworkId('evm', network.id);
+        chainId = (network.chainId ?? chainId).toString();
+        break;
+      }
+    }
+
     const namespace = 'eip155';
-    const chainId = '11155111';
     const namespaces: SessionTypes.Namespaces = {
       [namespace]: {
         accounts: evmAccounts.map((addr) => `${namespace}:${chainId}:${addr}`),

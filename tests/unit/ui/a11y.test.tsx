@@ -83,6 +83,7 @@ const INITIAL_STORE = {
   unlockedUntil: null,
   accounts: [],
   accountIndex: 0,
+  selectedAccountIdx: 0,
   balances: {},
   zkCapability: null,
   pendingApproval: null,

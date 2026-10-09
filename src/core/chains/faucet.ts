@@ -46,7 +46,18 @@ export interface FaucetAirdropResponse {
 export async function requestTestnetFaucet(
   chain: ChainId,
   address: string,
+  network: { id: string; faucet: boolean } = { id: `${chain}:testnet`, faucet: true },
 ): Promise<FaucetResult> {
+  // Mainnets (and custom RPCs classified without a faucet) refuse: there is
+  // no faucet for real funds, and pretending otherwise would be a fake
+  // feature.
+  if (!network.faucet) {
+    return {
+      ok: false,
+      chain,
+      error: 'This network has no faucet. Send real funds to the address instead.',
+    };
+  }
   switch (chain) {
     case 'evm':
       // Return a faucet URL that the UI will open in a new tab.
@@ -54,15 +65,15 @@ export async function requestTestnetFaucet(
       return {
         ok: true,
         chain,
-        faucetUrl: `https://sepoliafaucet.com/?address=${encodeURIComponent(address)}`,
+        faucetUrl: evmFaucetUrlFor(network.id, address),
       };
     case 'solana':
       try {
-        const hash = await solanaAirdrop(address);
+        const hash = await solanaAirdrop(address, network.id);
         return { ok: true, chain, txHash: hash };
       } catch {
         // If the automatic RPC airdrop is rate-limited or down, fall back to
-        // the Solana devnet faucet in a browser tab so the user still gets SOL.
+        // the Solana faucet in a browser tab so the user still gets SOL.
         return {
           ok: true,
           chain,
@@ -81,12 +92,38 @@ export async function requestTestnetFaucet(
   }
 }
 
+/** Browser faucets for the EVM testnets this wallet carries. */
+function evmFaucetUrlFor(networkId: string, address: string): string {
+  switch (networkId) {
+    case 'evm:base-sepolia':
+      return `https://www.alchemy.com/faucets/base-sepolia?address=${encodeURIComponent(address)}`;
+    case 'evm:polygon-amoy':
+      return `https://faucet.polygon.technology/?address=${encodeURIComponent(address)}`;
+    case 'evm:arbitrum-sepolia':
+      return `https://www.alchemy.com/faucets/arbitrum-sepolia?address=${encodeURIComponent(address)}`;
+    case 'evm:optimism-sepolia':
+      return `https://www.alchemy.com/faucets/optimism-sepolia?address=${encodeURIComponent(address)}`;
+    case 'evm:bsc-chapel':
+      return `https://testnet.bnbchain.org/faucet-smart`;
+    case 'evm:avalanche-fuji':
+      return `https://fauc.avax.network/?address=${encodeURIComponent(address)}`;
+    default:
+      // Sepolia and any other EVM testnet default to the Sepolia faucet.
+      return `https://sepoliafaucet.com/?address=${encodeURIComponent(address)}`;
+  }
+}
+
 function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : 'Faucet request failed.';
 }
 
-async function solanaAirdrop(address: string): Promise<string> {
-  const res = await fetch('https://api.devnet.solana.com', {
+async function solanaAirdrop(address: string, networkId: string): Promise<string> {
+  // The airdrop RPC follows the selected network: devnet drops devnet SOL,
+  // testnet drops testnet SOL. Airdrops only exist on faucet networks,
+  // which the caller has already verified.
+  const rpcUrl =
+    networkId === 'solana:testnet' ? 'https://api.testnet.solana.com' : 'https://api.devnet.solana.com';
+  const res = await fetch(rpcUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

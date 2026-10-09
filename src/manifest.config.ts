@@ -15,7 +15,7 @@ export default defineManifest({
   name: 'Veilpay',
   short_name: 'Veilpay',
   description:
-    'Self-custody multi-chain wallet with native agent payments and x402 support. Testnet only.',
+    'Self-custody multi-chain wallet with native agent payments and x402 support. Mainnets and testnets.',
   version: '0.0.1',
   minimum_chrome_version: '116',
 
@@ -71,14 +71,21 @@ export default defineManifest({
   ],
 
   host_permissions: [
-    // Testnet RPC only. Each entry is required for balance reads and broadcasts
-    // from the service worker; mainnet is deliberately absent. Multiple EVM
-    // endpoints are granted so fee estimation can fall back when a public node
-    // is rate-limited or down.
-    'https://ethereum-sepolia-rpc.publicnode.com/*',
-    'https://sepolia.gateway.tenderly.co/*',
+    // ── EVM: mainnets and testnets ──────────────────────────────────────
+    // publicnode.com hosts every publicnode preset (Ethereum, Base, Polygon,
+    // Arbitrum, Optimism, BNB, Avalanche + their testnets); one wildcard
+    // entry covers the whole family and each subdomain is a public, keyless
+    // RPC endpoint.
+    'https://*.publicnode.com/*',
+    // 1rpc.io covers Ethereum mainnet and Polygon (https://1rpc.io/eth, /matic).
     'https://1rpc.io/*',
+    'https://sepolia.gateway.tenderly.co/*',
+    // ── Solana: mainnet, devnet, testnet ─────────────────────────────────
     'https://api.devnet.solana.com/*',
+    'https://api.testnet.solana.com/*',
+    'https://api.mainnet.solana.com/*',
+    // ── Stellar: mainnet and testnet ─────────────────────────────────────
+    'https://horizon.stellar.org/*',
     'https://horizon-testnet.stellar.org/*',
     'https://friendbot.stellar.org/*', // testnet faucet (Stellar SDF)
     'https://veilpay-qzz1.onrender.com/*', // transaction indexer backend

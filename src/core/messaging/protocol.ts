@@ -95,6 +95,11 @@ export const RequestKind = z.enum([
   'agent.relay.register',
   'agent.relay.pairing-code',
   'agent.disable',
+  'networks.list',
+  'networks.selected',
+  'networks.select',
+  'networks.custom.add',
+  'networks.custom.remove',
 ]);
 export type RequestKind = z.infer<typeof RequestKind>;
 
@@ -169,6 +174,13 @@ export const PRIVILEGED_KINDS: readonly RequestKind[] = [
   'agent.relay.register',
   'agent.relay.pairing-code',
   'agent.disable',
+  // Switching the active network changes where balances are read from and
+  // where funds are broadcast — a page must never be able to redirect sends
+  // onto its own RPC. Only our own surfaces may switch or register custom
+  // RPC endpoints (a malicious custom network is the same attack).
+  'networks.select',
+  'networks.custom.add',
+  'networks.custom.remove',
 ] as const;
 
 export function isPrivilegedKind(kind: RequestKind): boolean {
@@ -397,7 +409,15 @@ export const TxEstimateRequest = baseEnvelope.extend({
 /** Builds, signs, and broadcasts a transfer. Irreversible once mined. */
 export const TxTransferRequest = baseEnvelope.extend({
   kind: z.literal('tx.transfer'),
-  payload: z.object(TransferPayload),
+  payload: z.object({
+    ...TransferPayload,
+    /**
+     * Optional Stellar transaction memo (MEMO_TEXT). Max 28 bytes once UTF-8
+     * encoded — Stellar's on-chain limit. Only Stellar transfers attach it;
+     * other chains reject the field rather than silently dropping it.
+     */
+    memo: z.string().max(28).optional(),
+  }),
 });
 
 const SecurityPinRequest = z.object({ pin: z.string().min(1).max(128) });
@@ -831,6 +851,67 @@ export const AgentDisableRequest = baseEnvelope.extend({
   payload: z.object({}),
 });
 
+// ── Network selection ─────────────────────────────────────────────────────
+
+/**
+ * A network the UI can render: the registry's public summary (no closures,
+ * since `explorerTx` cannot cross the message bus).
+ */
+export const NetworkSummary = z.object({
+  id: z.string().min(1),
+  chain: ChainId,
+  kind: z.enum(['mainnet', 'testnet']),
+  name: z.string().min(1),
+  symbol: z.string().min(1),
+  rpcUrls: z.array(z.string().url()),
+  chainId: z.number().int().positive().optional(),
+  explorerTx: z.string().url().optional(),
+  faucet: z.boolean(),
+});
+export type NetworkSummary = z.infer<typeof NetworkSummary>;
+
+export const NetworksListRequest = baseEnvelope.extend({
+  kind: z.literal('networks.list'),
+  payload: z.object({
+    /** Filter to one chain; omit to list every selectable network. */
+    chain: ChainId.optional(),
+  }),
+});
+
+export const NetworksSelectedRequest = baseEnvelope.extend({
+  kind: z.literal('networks.selected'),
+  payload: z.object({}),
+});
+
+export const NetworksSelectRequest = baseEnvelope.extend({
+  kind: z.literal('networks.select'),
+  payload: z.object({
+    chain: ChainId,
+    /** Preset id ('evm:sepolia') or custom id ('custom:My node'). */
+    networkId: z.string().min(1),
+  }),
+});
+
+export const NetworksCustomAddRequest = baseEnvelope.extend({
+  kind: z.literal('networks.custom.add'),
+  payload: z.object({
+    chain: ChainId,
+    /** Display name; unique across the custom list. */
+    name: z.string().min(1).max(64),
+    rpcUrl: z.string().url(),
+    /** EVM only: EIP-155 chain id the network signs with. */
+    chainId: z.number().int().positive().optional(),
+    explorerUrl: z.string().url().optional(),
+  }),
+});
+
+export const NetworksCustomRemoveRequest = baseEnvelope.extend({
+  kind: z.literal('networks.custom.remove'),
+  payload: z.object({
+    name: z.string().min(1).max(64),
+  }),
+});
+
 export const Request = z.discriminatedUnion('kind', [
   PingRequest,
   VaultStatusRequest,
@@ -891,6 +972,11 @@ export const Request = z.discriminatedUnion('kind', [
   AgentRelayRegisterRequest,
   AgentRelayPairingCodeRequest,
   AgentDisableRequest,
+  NetworksListRequest,
+  NetworksSelectedRequest,
+  NetworksSelectRequest,
+  NetworksCustomAddRequest,
+  NetworksCustomRemoveRequest,
 ]);
 export type Request = z.infer<typeof Request>;
 
@@ -1207,6 +1293,15 @@ export interface ResponseData {
   };
   'agent.relay.pairing-code': { pairingCode: string; pairingCodeExpiresAt: number };
   'agent.disable': { ok: boolean };
+  /** Selectable networks (presets + the user's custom RPCs), optionally per chain. */
+  'networks.list': NetworkSummary[];
+  /** Currently selected network id per chain. */
+  'networks.selected': Record<string, string>;
+  /** Whether the selection was applied. False when the id does not resolve. */
+  'networks.select': { ok: boolean };
+  /** Whether the custom network was added. False on a duplicate name. */
+  'networks.custom.add': { ok: boolean };
+  'networks.custom.remove': { ok: boolean };
 }
 
 export function newId(): string {

@@ -536,25 +536,24 @@ function decimalToStroops(decimal: string): bigint {
 class StellarService implements ChainService {
   readonly chain = 'stellar';
 
-  /** Default reliable Horizon testnet endpoint. */
+  /** Official testnet Horizon endpoint (the pre-network-selection default). */
   private static DEFAULT_ENDPOINT = 'https://horizon-testnet.stellar.org';
   private endpointIndex = 0;
 
   /**
-   * @param endpoints - Ordered Horizon endpoints. If none are given, the
-   *   official testnet endpoint is used. A custom first endpoint (from a user's
-   *   network config) is tried first, then the official one as a fallback, so
-   *   a stale or rate-limited custom gateway never bricks sending.
+   * @param endpoints - Ordered Horizon endpoints for the SELECTED network.
+   *   When none are given the official testnet endpoint is used (the
+   *   historical default). Endpoints are used exactly as provided — a mainnet
+   *   selection never silently falls back to a testnet node, because showing
+   *   testnet state as mainnet (or vice versa) is worse than an honest
+   *   read failure. Rotation still applies WITHIN the provided list.
    */
   constructor(private endpoints: string[] = [StellarService.DEFAULT_ENDPOINT]) {
     const deduped: string[] = [];
     for (const e of endpoints) {
       if (e.length > 0 && !deduped.includes(e)) deduped.push(e);
     }
-    if (!deduped.includes(StellarService.DEFAULT_ENDPOINT)) {
-      deduped.push(StellarService.DEFAULT_ENDPOINT);
-    }
-    this.endpoints = deduped;
+    this.endpoints = deduped.length > 0 ? deduped : [StellarService.DEFAULT_ENDPOINT];
   }
 
   async isFunded(address: string): Promise<boolean> {
@@ -825,8 +824,16 @@ class StellarService implements ChainService {
           return response;
         }
 
-        // A GET 404 from the official endpoint is the never-funded signal.
-        if (method === 'GET' && response.status === 404 && url.includes('horizon-testnet.stellar.org')) {
+        // A GET 404 from an official Horizon endpoint is the authoritative
+        // "account never funded" signal (Stellar accounts only exist once
+        // created) — on BOTH mainnet and testnet. A 404 from a custom mirror
+        // only means "unknown to this mirror"; that rotates onward.
+        if (
+          method === 'GET' &&
+          response.status === 404 &&
+          (url.includes('horizon.stellar.org') ||
+            url.includes('horizon-testnet.stellar.org'))
+        ) {
           return 'notFound';
         }
 

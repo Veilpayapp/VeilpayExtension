@@ -1,14 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import {
-  EIP1193,
-  SUPPORTED_EVM_CHAIN_ID,
-  eip1193CodeFor,
-  eip1193Error,
-} from '@/core/chains/evm/eip1193';
+import { EIP1193, eip1193CodeFor, eip1193Error } from '@/core/chains/evm/eip1193';
+import { findEvmNetworkByChainId } from '@/core/networks';
 
 describe('eip1193 helpers', () => {
-  it('declares Sepolia as the only supported EVM chain', () => {
-    expect(SUPPORTED_EVM_CHAIN_ID).toBe('0xaa36a7'); // 11155111 in hex
+  it('resolves Sepolia by chain id through the network registry', () => {
+    expect(findEvmNetworkByChainId(11155111)?.id).toBe('evm:sepolia');
+  });
+
+  it('resolves every supported EVM network by its live-verified chain id', () => {
+    expect(findEvmNetworkByChainId(1)?.id).toBe('evm:ethereum');
+    expect(findEvmNetworkByChainId(8453)?.id).toBe('evm:base');
+    expect(findEvmNetworkByChainId(137)?.id).toBe('evm:polygon');
+    expect(findEvmNetworkByChainId(42161)?.id).toBe('evm:arbitrum');
+    expect(findEvmNetworkByChainId(10)?.id).toBe('evm:optimism');
+    expect(findEvmNetworkByChainId(43114)?.id).toBe('evm:avalanche');
+  });
+
+  it('returns undefined for a chain id no preset carries', () => {
+    expect(findEvmNetworkByChainId(123456789)).toBeUndefined();
   });
 
   it('maps the protocol CHAIN_UNSUPPORTED code to EIP-1193 4902', () => {

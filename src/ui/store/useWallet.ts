@@ -3,6 +3,7 @@ import { createClient } from '@/core/messaging/client';
 import type {
   ChainId,
   MessageSource,
+  NetworkSummary,
   StellarAssetInput,
   TokenInputType,
   VaultState,
@@ -94,6 +95,13 @@ interface WalletState {
   unlockedUntil: number | null;
   accounts: AccountView[];
   accountIndex: number;
+  /**
+   * Index into `accounts` of the network the dashboard is showing. Lifted
+   * into the store (not Dashboard-local state) so navigating to
+   * send/receive and back keeps the user's selected network — local state
+   * reset to EVM on every remount.
+   */
+  selectedAccountIdx: number;
   /** Native units (wei / lamports / stroops). Absent until fetched. */
   balances: Partial<Record<BalanceKey, bigint>>;
   zkCapability: ZkCapability | null;
@@ -137,6 +145,10 @@ interface WalletState {
     hint: string;
     createdAt: number;
   } | null;
+  /** Every selectable network (presets + the user's custom RPCs). */
+  networks: NetworkSummary[];
+  /** The selected network id per chain (from the background's persisted selection). */
+  selectedNetworks: Partial<Record<ChainId, string>>;
 }
 
 interface WalletActions {
@@ -177,6 +189,8 @@ interface WalletActions {
   reset(): Promise<boolean>;
   lock(): Promise<void>;
   setAccountIndex(index: number): void;
+  /** Selects which account/network card the dashboard shows. */
+  setSelectedAccountIdx(index: number): void;
   clearError(): void;
   /** Fetch a fee estimate for a transfer. Throws on failure. */
   estimateTransfer(
@@ -204,6 +218,8 @@ interface WalletActions {
     amount: string,
     asset?: StellarAssetInput,
     token?: TokenInputType,
+    /** Optional Stellar MEMO_TEXT (≤ 28 bytes). */
+    memo?: string,
   ): Promise<{ hash: string; decimals: number }>;
   /** Security settings for the setup flow. Safe while locked. */
   loadSecurityStatus(): Promise<void>;
@@ -257,10 +273,52 @@ interface WalletActions {
   loadWcRequest(): Promise<void>;
   /** WalletConnect: resolve pending request (approve or deny). */
   wcResolveRequest(action: 'approve' | 'deny'): Promise<boolean>;
+  /** Networks: load every selectable network and the per-chain selection. */
+  loadNetworks(): Promise<void>;
+  /** Networks: persist the selected network for a chain. Returns false when the id is invalid. */
+  selectNetwork(chain: ChainId, networkId: string): Promise<boolean>;
+  /** Networks: register a custom RPC endpoint. False on a duplicate name. */
+  addCustomNetwork(input: {
+    chain: ChainId;
+    name: string;
+    rpcUrl: string;
+    chainId?: number;
+    explorerUrl?: string;
+  }): Promise<boolean>;
+  /** Networks: remove a custom RPC by name. */
+  removeCustomNetwork(name: string): Promise<boolean>;
 }
 
 const send = createClient('popup' as MessageSource);
 let refreshInFlight: Promise<void> | null = null;
+
+/**
+ * `chrome.storage.session` accessor for UI prefs (which chain card the
+ * dashboard shows). Survives popup close/reopen within a browser session —
+ * the fix for "switch network, close, reopen: back on EVM" — and is null
+ * outside Chrome (tests, non-extension hosts) where the in-memory default
+ * applies.
+ */
+const UI_SELECTION_KEY = 'ui:selectedAccountIdx';
+const sessionStore = globalThis.chrome?.storage?.session;
+
+async function persistSelectedAccountIdx(index: number): Promise<void> {
+  try {
+    await sessionStore?.set({ [UI_SELECTION_KEY]: index });
+  } catch {
+    // Non-fatal: an unpersisted selection only resets on the next popup open.
+  }
+}
+
+async function restoreSelectedAccountIdx(): Promise<number | null> {
+  try {
+    const stored = await sessionStore?.get(UI_SELECTION_KEY);
+    const value = stored?.[UI_SELECTION_KEY];
+    return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
 
 function messageFor(cause: unknown, fallback: string): string {
   return cause instanceof Error ? cause.message : fallback;
@@ -279,7 +337,9 @@ async function readStatus(): Promise<
   const status = await send('vault.status', {});
   let zk: ZkCapability | null = null;
   try {
-    zk = await send('zk.capability', {});
+    // Normalize a malformed/absent response to null — the store contract is
+    // `ZkCapability | null`, and `undefined` would crash the ZkResult card.
+    zk = (await send('zk.capability', {})) ?? null;
   } catch {
     // Cosmetic read; keep boot moving.
   }
@@ -291,6 +351,7 @@ export const useWallet = create<WalletState & WalletActions>((set, get) => ({
   unlockedUntil: null,
   accounts: [],
   accountIndex: 0,
+  selectedAccountIdx: 0,
   balances: {},
   zkCapability: null,
   securityStatus: null,
@@ -301,6 +362,8 @@ export const useWallet = create<WalletState & WalletActions>((set, get) => ({
   pendingWcProposal: null,
   wcSessions: [],
   pendingWcRequest: null,
+  networks: [],
+  selectedNetworks: {},
   isLoading: false,
   error: null,
 
@@ -315,6 +378,13 @@ export const useWallet = create<WalletState & WalletActions>((set, get) => ({
           unlockedUntil: status.unlockedUntil,
           zkCapability: zk,
         });
+        // Restore the persisted dashboard selection once per surface boot,
+        // then load the network list + selection so every label is live.
+        const restored = await restoreSelectedAccountIdx();
+        if (restored !== null && get().selectedAccountIdx !== restored) {
+          set({ selectedAccountIdx: restored });
+        }
+        await get().loadNetworks();
       } catch (firstError) {
         // Chrome can be slow to wake a cold service worker; the first status
         // read occasionally times out before the SW registers. Retry once
@@ -495,7 +565,13 @@ export const useWallet = create<WalletState & WalletActions>((set, get) => ({
       const { state } = await send('session.lock', {});
       // Addresses and balances are dropped on lock: leaving them rendered would
       // imply a live session that no longer exists.
-      set({ vaultState: state, unlockedUntil: null, accounts: [], balances: {} });
+      set({
+        vaultState: state,
+        unlockedUntil: null,
+        accounts: [],
+        balances: {},
+        selectedAccountIdx: 0,
+      });
     } catch (cause) {
       set({ error: messageFor(cause, 'Could not lock the wallet.') });
     } finally {
@@ -505,7 +581,23 @@ export const useWallet = create<WalletState & WalletActions>((set, get) => ({
 
   setAccountIndex: (index) => {
     if (!Number.isInteger(index) || index < 0) return;
-    set({ accountIndex: index, accounts: [], balances: {} });
+    set({ accountIndex: index, accounts: [], balances: {}, selectedAccountIdx: 0 });
+  },
+
+  setSelectedAccountIdx: (index) => {
+    // Clamp instead of ignoring: the accounts list length is known to the
+    // store, so an out-of-range request can safely fall back to 0.
+    const max = get().accounts.length - 1;
+    let value: number;
+    if (!Number.isInteger(index) || index < 0 || max < 0) {
+      value = 0;
+    } else {
+      value = Math.min(index, max);
+    }
+    set({ selectedAccountIdx: value });
+    // Persist so reopening the popup (a fresh store instance) shows the same
+    // network card the user chose — the "back to EVM testnet" bug.
+    void persistSelectedAccountIdx(value);
   },
 
   estimateTransfer: async (chain, index, to, amount, asset, token) => {
@@ -528,7 +620,7 @@ export const useWallet = create<WalletState & WalletActions>((set, get) => ({
     }
   },
 
-  sendTransfer: async (chain, index, to, amount, asset, token) => {
+  sendTransfer: async (chain, index, to, amount, asset, token, memo) => {
     set({ error: null });
     try {
       const payload: {
@@ -538,9 +630,11 @@ export const useWallet = create<WalletState & WalletActions>((set, get) => ({
         amount: string;
         asset?: StellarAssetInput;
         token?: TokenInputType;
+        memo?: string;
       } = { chain, index, to, amount };
       if (asset !== undefined) payload.asset = asset;
       if (token !== undefined) payload.token = token;
+      if (memo !== undefined && memo.trim().length > 0) payload.memo = memo.trim();
       return await send('tx.transfer', payload);
     } catch (cause) {
       set({ error: messageFor(cause, 'Could not send the transfer.') });
@@ -817,6 +911,73 @@ export const useWallet = create<WalletState & WalletActions>((set, get) => ({
       return ok;
     } catch (cause) {
       set({ error: messageFor(cause, 'Could not resolve the WalletConnect request.') });
+      return false;
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
+  // ---- Networks -----------------------------------------------------------
+
+  loadNetworks: async () => {
+    try {
+      const [networks, selected] = await Promise.all([
+        send('networks.list', {}),
+        send('networks.selected', {}),
+      ]);
+      set({
+        networks: Array.isArray(networks) ? networks : [],
+        selectedNetworks:
+          typeof selected === 'object' && selected !== null ? selected : {},
+      });
+    } catch {
+      // The network list is cosmetic-but-load-bearing for labels; a failure
+      // keeps the previous list (labels fall back to the chain name) and must
+      // not block the boot status read that runs alongside it.
+    }
+  },
+
+  selectNetwork: async (chain, networkId) => {
+    set({ isLoading: true, error: null });
+    try {
+      const { ok } = await send('networks.select', { chain, networkId });
+      if (ok) {
+        set({ selectedNetworks: { ...get().selectedNetworks, [chain]: networkId } });
+        // Balances and history are network-scoped; reload them so the
+        // dashboard reflects the new network immediately.
+        await get().loadAllBalances();
+      }
+      return ok;
+    } catch (cause) {
+      set({ error: messageFor(cause, 'Could not switch the network.') });
+      return false;
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
+  addCustomNetwork: async (input) => {
+    set({ isLoading: true, error: null });
+    try {
+      const { ok } = await send('networks.custom.add', input);
+      if (ok) await get().loadNetworks();
+      return ok;
+    } catch (cause) {
+      set({ error: messageFor(cause, 'Could not add the custom network.') });
+      return false;
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
+  removeCustomNetwork: async (name) => {
+    set({ isLoading: true, error: null });
+    try {
+      const { ok } = await send('networks.custom.remove', { name });
+      if (ok) await get().loadNetworks();
+      return ok;
+    } catch (cause) {
+      set({ error: messageFor(cause, 'Could not remove the custom network.') });
       return false;
     } finally {
       set({ isLoading: false });

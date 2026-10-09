@@ -1,7 +1,7 @@
 import { dispatch, ProtocolError, type HandlerMap } from '@/core/messaging/router';
 import * as vault from '@/core/vault';
 import { readMeta, writeMeta } from '@/core/vault/storage';
-import { createChainService, TESTNET_ENDPOINTS } from '@/core/chains';
+import { createChainService } from '@/core/chains';
 import { decimalAmountToBaseUnits } from '@/core/chains/amounts';
 import { fetchTransactionHistoryCached } from '@/core/chains/indexer-service';
 import {
@@ -10,10 +10,22 @@ import {
   type StellarAssetInput,
   type TokenInputType,
 } from '@/core/messaging/protocol';
-import { resolveRpcUrl } from '@/core/networks';
+import {
+  addCustomNetwork,
+  findEvmNetworkByChainId,
+  getSelectedNetwork,
+  getSelectedNetworkId,
+  listSelectableNetworks,
+  removeCustomNetwork,
+  resolveEvmChainId,
+  resolveNetworkRpcUrl,
+  resolveNetworkRpcUrls,
+  resolveStellarPassphrase,
+  setSelectedNetworkId,
+  toNetworkSummary,
+} from '@/core/networks';
 import { RpcFeeSource, estimateTransferFee } from '@/core/chains/evm/fees';
 import {
-  EVM_CHAIN_ID,
   signTransaction,
   signPersonalMessage,
   type UnsignedEvmTransaction,
@@ -191,7 +203,10 @@ const handlers: HandlerMap = {
    * precision above 2^53.
    */
   'account.balance': async (payload) => {
-    const service = createChainService(payload.chain);
+    const service = createChainService(
+      payload.chain,
+      await resolveNetworkRpcUrl(payload.chain),
+    );
     const balance = await service.getBalance(payload.address);
     return {
       chain: payload.chain,
@@ -253,7 +268,7 @@ const handlers: HandlerMap = {
           isErc20 && typeof descriptor.address === 'string'
             ? erc20TransferCalldata(payload.to, amount)
             : undefined;
-        const source = new RpcFeeSource();
+        const source = new RpcFeeSource(await resolveNetworkRpcUrls('evm'));
         const fees = await estimateTransferFee(
           source,
           address,
@@ -274,7 +289,7 @@ const handlers: HandlerMap = {
       case 'solana': {
         const service = createChainService(
           'solana',
-          await resolveRpcUrl('solana', TESTNET_ENDPOINTS.solana)
+          await resolveNetworkRpcUrl('solana'),
         );
         const fee = await service.estimateGas({});
         return {
@@ -503,27 +518,41 @@ const handlers: HandlerMap = {
    */
 
   'eth.chainId': async () => ({
-    chainId: `0x${EVM_CHAIN_ID.toString(16)}`,
+    chainId: `0x${(await resolveEvmChainId()).toString(16)}`,
   }),
 
   /**
    * EIP-1193 `wallet_switchEthereumChain`.
    *
-   * The wallet is single-chain (Sepolia), so the only valid target is the
-   * current chain; anything else fails with CHAIN_UNSUPPORTED (mapped to
-   * EIP-1193 4902 by the inpage shim). The inpage emits `chainChanged` to the
-   * dapp after a successful switch.
+   * The requested chain id resolves against the EVM network registry; when a
+   * preset matches, the wallet PERSISTS that selection (balances, signing,
+   * `eth.chainId`, and WalletConnect sessions all follow it), and the inpage
+   * shim emits `chainChanged` to the dapp. An unrecognized id fails with
+   * CHAIN_UNSUPPORTED, which the shim maps to EIP-1193 4902.
    */
   'eth.switchChain': async (payload) => {
-    const requested = payload.chainId.toLowerCase();
-    const current = `0x${EVM_CHAIN_ID.toString(16)}`.toLowerCase();
-    if (requested !== current) {
+    const requestedHex = payload.chainId.toLowerCase().replace(/^0x/, '');
+    const requestedId = Number.parseInt(requestedHex, 16);
+    if (!Number.isInteger(requestedId) || requestedId <= 0) {
       throw new ProtocolError(
         'CHAIN_UNSUPPORTED',
-        `Unrecognized chain ID ${payload.chainId}. Veilpay supports Sepolia (${current}).`
+        `Unrecognized chain ID ${payload.chainId}.`
       );
     }
-    return { chainId: current };
+    const network = findEvmNetworkByChainId(requestedId);
+    if (network === undefined) {
+      throw new ProtocolError(
+        'CHAIN_UNSUPPORTED',
+        `Veilpay does not support chain ID ${payload.chainId}.`
+      );
+    }
+    await setSelectedNetworkId('evm', network.id);
+    void appendAudit('network.switched', {
+      chain: 'evm',
+      networkId: network.id,
+      by: 'dapp',
+    });
+    return { chainId: `0x${requestedId.toString(16)}` };
   },
 
   'eth.requestAccounts': async (_payload, ctx) => {
@@ -626,8 +655,8 @@ const handlers: HandlerMap = {
     // Approved — sign and broadcast with the vault's key, inside withAccount so
     // the private key never outlives the call.
     return vault.withAccount('evm', accountIndex, async (account) => {
-      const service = createChainService('evm');
-      const source = new RpcFeeSource();
+      const service = createChainService('evm', await resolveNetworkRpcUrl('evm'));
+      const source = new RpcFeeSource(await resolveNetworkRpcUrls('evm'));
 
       const value = payload.tx.value === undefined ? 0n : normalizeWei(payload.tx.value);
       const data = payload.tx.data === undefined ? undefined : hexToBytesStrict(payload.tx.data);
@@ -639,7 +668,7 @@ const handlers: HandlerMap = {
       ]);
 
       const unsigned: UnsignedEvmTransaction = {
-        chainId: EVM_CHAIN_ID,
+        chainId: await resolveEvmChainId(),
         nonce,
         maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
         maxFeePerGas: fees.maxFeePerGas,
@@ -724,7 +753,7 @@ const handlers: HandlerMap = {
     if (!ALLOWED_EVM_READS.has(payload.method)) {
       throw new ProtocolError('UNKNOWN_KIND', `RPC method "${payload.method}" is not allowed.`);
     }
-    const service = createChainService('evm');
+    const service = createChainService('evm', await resolveNetworkRpcUrl('evm'));
     if (typeof service.rpcCall !== 'function') {
       throw new ProtocolError('INTERNAL', 'EVM read passthrough is unavailable.');
     }
@@ -1402,7 +1431,13 @@ const handlers: HandlerMap = {
    * the address alone is enough.
    */
   'faucet.request': async (payload) => {
-    const result = await requestTestnetFaucet(payload.chain, payload.address);
+    // The faucet only exists on testnets; the selected network decides
+    // whether one applies (and which), never the caller.
+    const network = await getSelectedNetwork(payload.chain);
+    const result = await requestTestnetFaucet(payload.chain, payload.address, {
+      id: network.id,
+      faucet: network.faucet,
+    });
     if (!result.ok) {
       throw new ProtocolError('BAD_REQUEST', result.error);
     }
@@ -1671,6 +1706,55 @@ const handlers: HandlerMap = {
     void appendAudit('agent.unpaired', {});
     return { ok: true };
   },
+
+  // ── Network selection ─────────────────────────────────────────────────
+  //
+  // The wallet's active network per chain. `networks.select` is privileged
+  // (router-enforced): a page must not be able to redirect balances reads or
+  // broadcasts onto an RPC it controls.
+
+  'networks.list': async (payload) => {
+    const chains: ChainId[] =
+      payload.chain !== undefined ? [payload.chain] : ['stellar', 'evm', 'solana'];
+    const summaries = await Promise.all(chains.map((chain) => listSelectableNetworks(chain)));
+    return summaries.flat().map(toNetworkSummary);
+  },
+
+  'networks.selected': async () => {
+    const chains: ChainId[] = ['stellar', 'evm', 'solana'];
+    const selected: Record<string, string> = {};
+    for (const chain of chains) {
+      selected[chain] = await getSelectedNetworkId(chain);
+    }
+    return selected;
+  },
+
+  'networks.select': async (payload) => {
+    const ok = await setSelectedNetworkId(payload.chain, payload.networkId);
+    if (ok) {
+      void appendAudit('network.switched', {
+        chain: payload.chain,
+        networkId: payload.networkId,
+      });
+    }
+    return { ok };
+  },
+
+  'networks.custom.add': async (payload) => {
+    const ok = await addCustomNetwork({
+      chain: payload.chain,
+      name: payload.name,
+      rpcUrl: payload.rpcUrl,
+      ...(payload.chainId !== undefined ? { chainId: payload.chainId } : {}),
+      ...(payload.explorerUrl !== undefined ? { explorerUrl: payload.explorerUrl } : {}),
+    });
+    return { ok };
+  },
+
+  'networks.custom.remove': async (payload) => {
+    await removeCustomNetwork(payload.name);
+    return { ok: true };
+  },
 };
 
 /** Decimal places used to convert human-readable token amounts to base units. */
@@ -1738,15 +1822,15 @@ async function resolveWcRequest(req: {
         typeof tx.data === 'string' && tx.data.length > 0 ? hexToBytesStrict(tx.data) : undefined;
 
       const hash = await vault.withAccount('evm', accountIndex, async (account) => {
-        const service = createChainService('evm');
-        const source = new RpcFeeSource();
+        const service = createChainService('evm', await resolveNetworkRpcUrl('evm'));
+        const source = new RpcFeeSource(await resolveNetworkRpcUrls('evm'));
         const target = to ?? account.address;
         const [nonce, fees] = await Promise.all([
           service.getSequence(account.address),
           estimateTransferFee(source, account.address, target, value, data),
         ]);
         const unsigned: UnsignedEvmTransaction = {
-          chainId: EVM_CHAIN_ID,
+          chainId: await resolveEvmChainId(),
           nonce,
           maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
           maxFeePerGas: fees.maxFeePerGas,
@@ -1882,7 +1966,7 @@ async function resolveToken(
   descriptor: TokenDescriptor,
   address: string
 ): Promise<{ decimals: number; spendable: bigint; symbol: string }> {
-  const service = createChainService(chain, await resolveRpcUrl(chain, TESTNET_ENDPOINTS[chain]));
+  const service = createChainService(chain, await resolveNetworkRpcUrl(chain));
 
   // Native token: precision + balance come straight from the chain.
   if (descriptor.kind === 'native') {
@@ -1926,9 +2010,9 @@ async function resolveToken(
 }
 
 /**
- * Reads the current Stellar base fee (stroops) from the configured Horizon
- * endpoint, falling back to the official testnet gateway. Uses the chain
- * service so endpoint rotation, timeouts, and custom networks all apply.
+ * Reads the current Stellar base fee (stroops) from the selected network's
+ * Horizon endpoint, falling back to the official testnet gateway. Uses the
+ * chain service so endpoint rotation, timeouts, and custom networks all apply.
  */
 async function fetchStellarBaseFee(): Promise<bigint> {
   const service = createChainService('stellar', await resolveStellarEndpoints());
@@ -1936,15 +2020,12 @@ async function fetchStellarBaseFee(): Promise<bigint> {
 }
 
 /**
- * Resolves the Stellar Horizon endpoints, honoring a user-configured custom
- * network (tried first) with the official testnet gateway as automatic
- * fallback inside `StellarService`.
+ * Resolves the Stellar Horizon endpoints for the SELECTED network (custom RPC
+ * first, then the network's own endpoint list), with the official testnet
+ * gateway appended inside `StellarService` as an automatic fallback.
  */
 async function resolveStellarEndpoints(): Promise<string[]> {
-  const custom = await resolveRpcUrl('stellar', TESTNET_ENDPOINTS.stellar);
-  const endpoints: string[] = [];
-  if (custom.length > 0) endpoints.push(custom);
-  return endpoints;
+  return resolveNetworkRpcUrls('stellar');
 }
 
 /**
@@ -2050,20 +2131,27 @@ async function buildAndBroadcast(
     to: string;
     amount: string;
     asset?: StellarAssetInput | undefined;
+    /** Optional Stellar MEMO_TEXT; rejected on other chains. */
+    memo?: string | undefined;
   },
   amount: bigint,
   descriptor: TokenDescriptor,
   decimals: number,
   spendable: bigint
 ): Promise<{ chain: ChainId; from: string; to: string; amountNative: string; hash: string }> {
+  if (payload.memo !== undefined && payload.memo.trim().length > 0 && payload.chain !== 'stellar') {
+    // Refuse rather than drop: silently discarding user input the UI collected
+    // is exactly the "fake feature" failure mode this path must avoid.
+    throw new ProtocolError(
+      'BAD_REQUEST',
+      'Memos are only supported on Stellar transfers.'
+    );
+  }
   switch (payload.chain) {
     case 'evm': {
       return vault.withAccount('evm', payload.index, async (account) => {
-        const service = createChainService(
-          'evm',
-          await resolveRpcUrl('evm', TESTNET_ENDPOINTS.evm)
-        );
-        const source = new RpcFeeSource();
+        const service = createChainService('evm', await resolveNetworkRpcUrl('evm'));
+        const source = new RpcFeeSource(await resolveNetworkRpcUrls('evm'));
 
         const isErc20 = descriptor.kind === 'erc20';
         const data =
@@ -2093,11 +2181,14 @@ async function buildAndBroadcast(
 
         // For a plain EVM value transfer the recipient is `to` and the value is
         // the amount. For an ERC20 send we target the contract with the token
-        // `transfer` calldata and a zero native value.
+        // `transfer` calldata and a zero native value. The EIP-155 chain id
+        // comes from the SELECTED network, so a send follows whatever network
+        // the user (or a dapp's wallet_switchEthereumChain) chose.
+        const evmChainId = await resolveEvmChainId();
         const unsigned: UnsignedEvmTransaction =
           isErc20 && descriptor.kind === 'erc20'
             ? {
-                chainId: EVM_CHAIN_ID,
+                chainId: evmChainId,
                 nonce,
                 maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
                 maxFeePerGas: fees.maxFeePerGas,
@@ -2107,7 +2198,7 @@ async function buildAndBroadcast(
                 data: erc20TransferCalldata(payload.to, amount),
               }
             : {
-                chainId: EVM_CHAIN_ID,
+                chainId: evmChainId,
                 nonce,
                 maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
                 maxFeePerGas: fees.maxFeePerGas,
@@ -2138,7 +2229,7 @@ async function buildAndBroadcast(
         const blockhash = await fetchSolanaBlockhash();
         const service = createChainService(
           'solana',
-          await resolveRpcUrl('solana', TESTNET_ENDPOINTS.solana)
+          await resolveNetworkRpcUrl('solana')
         );
 
         if (descriptor.kind === 'spl') {
@@ -2227,9 +2318,12 @@ async function buildAndBroadcast(
             typeof service.isFunded === 'function' &&
             !(await service.isFunded(account.address))
           ) {
+            const stellarNetwork = await getSelectedNetwork('stellar');
             throw new ProtocolError(
               'BAD_REQUEST',
-              'This Stellar address has not been funded on testnet yet. Use "Get testnet funds" first.'
+              stellarNetwork.faucet
+                ? `This Stellar address has not been funded on ${stellarNetwork.name} yet. Use "Get testnet funds" first.`
+                : `This Stellar address has not been funded on ${stellarNetwork.name}.`
             );
           }
           // Pre-submit spendable check so a low balance surfaces as a clear
@@ -2258,6 +2352,11 @@ async function buildAndBroadcast(
           asset,
           sequence,
           fee,
+          memo: payload.memo,
+          // The signature base binds to the SELECTED network's passphrase —
+          // a mainnet passphrase makes the signature valid on mainnet and
+          // rejected on testnet, and vice versa.
+          networkPassphrase: await resolveStellarPassphrase(),
         };
         const signed = signStellarPayment(unsigned, account.privateKey);
 
@@ -2282,11 +2381,11 @@ async function buildAndBroadcast(
 }
 
 /**
- * Fetches a recent blockhash from the Solana Devnet RPC.
+ * Fetches a recent blockhash from the SELECTED Solana network's RPC.
  * The blockhash is required to build a valid transaction.
  */
 async function fetchSolanaBlockhash(): Promise<Uint8Array> {
-  const rpcUrl = await resolveRpcUrl('solana', TESTNET_ENDPOINTS.solana);
+  const rpcUrl = await resolveNetworkRpcUrl('solana');
   const response = await fetch(rpcUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -2469,7 +2568,15 @@ async function executeAgentTool(tool: string, args: Record<string, unknown>): Pr
   switch (tool) {
     case 'status': {
       const state = await vault.getState();
-      return { unlocked: state === 'unlocked', testnetOnly: true };
+      const selected = await getSelectedNetworkId(args.chain === undefined ? 'evm' : asChain(args.chain));
+      const network = await getSelectedNetwork(args.chain === undefined ? 'evm' : asChain(args.chain));
+      return {
+        unlocked: state === 'unlocked',
+        testnetOnly: network.kind === 'testnet',
+        network: network.name,
+        networkId: selected,
+        networkKind: network.kind,
+      };
     }
     case 'accounts': {
       const accounts = await vault.getAllAccountAddresses(0);
@@ -2481,14 +2588,13 @@ async function executeAgentTool(tool: string, args: Record<string, unknown>): Pr
         typeof args.address === 'string' && args.address.length > 0
           ? args.address
           : (await vault.getAccountAddress(chain, 0)).address;
-      const service = createChainService(
-        chain,
-        await resolveRpcUrl(chain, TESTNET_ENDPOINTS[chain])
-      );
+      const network = await getSelectedNetwork(chain);
+      const service = createChainService(chain, await resolveNetworkRpcUrl(chain));
       const balance = await service.getBalance(address);
       return {
         chain,
         address,
+        network: network.name,
         balance: balance.toString(),
         decimals: CHAIN_DECIMALS[chain],
         symbol: NATIVE_SYMBOL[chain],
@@ -2540,7 +2646,7 @@ async function executeAgentSend(args: Record<string, unknown>): Promise<unknown>
     throw new ProtocolError('BAD_REQUEST', 'Amount must be greater than zero.');
   }
 
-  const service = createChainService(chain, await resolveRpcUrl(chain, TESTNET_ENDPOINTS[chain]));
+  const service = createChainService(chain, await resolveNetworkRpcUrl(chain));
   const spendable = await service.getBalance(account);
 
   const broadcast = () =>
@@ -2709,6 +2815,13 @@ async function handleInternalMessage(
 // Startup marker. If you do not see this in chrome://extensions -> service
 // worker console, the SW bundle did not evaluate — check for errors above it.
 console.info('[veilpay] service worker module evaluating');
+
+// Re-arm the idle-relock alarm on EVERY service-worker wake, not just
+// install/startup/unlock: Chrome can drop alarms across a browser update or
+// crash, and a lost alarm means the vault never relocks at the 15-minute
+// mark. Creating an alarm that already exists is a no-op, so this is safe
+// to call unconditionally.
+ensureIdleAlarm();
 let firstMessage = true;
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (firstMessage) {

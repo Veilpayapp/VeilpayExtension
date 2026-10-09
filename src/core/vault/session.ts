@@ -32,11 +32,28 @@ export class SessionService {
    */
   private stopped = false;
 
-  constructor(idleMs: number, now: number = Date.now()) {
+  constructor(
+    idleMs: number,
+    now: number = Date.now(),
+    restore?: { startedAt: number; lastActivityAt: number },
+  ) {
     this.assertIdleInRange(idleMs);
     this.idleMs = idleMs;
-    this.startedAt = now;
-    this.lastActivityAt = now;
+    if (
+      restore !== undefined &&
+      Number.isFinite(restore.startedAt) &&
+      Number.isFinite(restore.lastActivityAt) &&
+      restore.startedAt <= restore.lastActivityAt
+    ) {
+      // Reviving a persisted session: the ORIGINAL window continues — the
+      // timestamps are restored, not restarted, so a service-worker
+      // eviction cannot grant extra unlock time.
+      this.startedAt = restore.startedAt;
+      this.lastActivityAt = restore.lastActivityAt;
+    } else {
+      this.startedAt = now;
+      this.lastActivityAt = now;
+    }
   }
 
   private assertIdleInRange(ms: number): void {
@@ -86,6 +103,16 @@ export class SessionService {
     const untilIdle = this.lastActivityAt + this.idleMs - now;
     const untilCeiling = this.startedAt + MAX_SESSION_MS - now;
     return Math.max(0, Math.min(untilIdle, untilCeiling));
+  }
+
+  /** When this unlock began (epoch ms) — read-only, for session persistence. */
+  get sessionStartedAt(): number {
+    return this.startedAt;
+  }
+
+  /** When the user last acted (epoch ms) — read-only, for persistence. */
+  get sessionLastActivityAt(): number {
+    return this.lastActivityAt;
   }
 
   /**

@@ -255,3 +255,168 @@ describe('Stellar transfer serialization', () => {
     expect(raw.slice(128, 160)).toEqual(new Uint8Array(32).fill(0x0d));
   });
 });
+
+describe('Stellar MEMO_TEXT encoding', () => {
+  /** Decodes an envelope into its transaction XDR and signature parts. */
+  function splitEnvelope(raw: string): { txXdr: Uint8Array; sig: Uint8Array } {
+    const envelope = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0));
+    // [uint32 disc][txXdr][uint32 sigCount][hint 4][opaque: uint32 64 + 64 bytes]
+    const sigCountStart = envelope.length - (4 + 4 + 4 + 64);
+    const txXdr = envelope.slice(4, sigCountStart);
+    const sig = envelope.slice(sigCountStart + 12, sigCountStart + 12 + 64);
+    return { txXdr, sig };
+  }
+
+  it('encodes MEMO_NONE when no memo is given (byte-compatible with history)', () => {
+    const result = signStellarPayment({
+      from: SOURCE_ADDRESS,
+      to: DEST_ADDRESS,
+      amount: 100n,
+      sequence: 120n,
+      fee: 100,
+    }, PRIVATE_KEY);
+
+    const raw = Uint8Array.from(atob(result.raw), (c) => c.charCodeAt(0));
+    // Memo field sits after source(36) + fee(4) + seq(8) + preconditions(4).
+    expect(raw.slice(52, 56)).toEqual(new Uint8Array(4)); // PRECOND_NONE
+    expect(raw.slice(56, 60)).toEqual(new Uint8Array([0, 0, 0, 0])); // MEMO_NONE
+    expect(raw.slice(60, 64)).toEqual(new Uint8Array([0, 0, 0, 1])); // ops count right after
+  });
+
+  it('treats an empty or whitespace-only memo as MEMO_NONE', () => {
+    for (const memo of ['', '   ']) {
+      const result = signStellarPayment({
+        from: SOURCE_ADDRESS,
+        to: DEST_ADDRESS,
+        amount: 100n,
+        sequence: 120n,
+        fee: 100,
+        memo,
+      }, PRIVATE_KEY);
+
+      const raw = Uint8Array.from(atob(result.raw), (c) => c.charCodeAt(0));
+      expect(raw.slice(56, 60)).toEqual(new Uint8Array([0, 0, 0, 0])); // MEMO_NONE
+      expect(raw.slice(60, 64)).toEqual(new Uint8Array([0, 0, 0, 1])); // ops count unshifted
+    }
+  });
+
+  it('encodes MEMO_TEXT with length prefix and 4-byte alignment padding', () => {
+    const result = signStellarPayment({
+      from: SOURCE_ADDRESS,
+      to: DEST_ADDRESS,
+      amount: 100n,
+      sequence: 120n,
+      fee: 100,
+      memo: 'order-123', // 9 bytes → padded to 12
+    }, PRIVATE_KEY);
+
+    const raw = Uint8Array.from(atob(result.raw), (c) => c.charCodeAt(0));
+    // MEMO_TEXT discriminant = 1 at the memo position (56).
+    expect(raw.slice(56, 60)).toEqual(new Uint8Array([0, 0, 0, 1]));
+    // uint32 byte length = 9.
+    expect(raw.slice(60, 64)).toEqual(new Uint8Array([0, 0, 0, 9]));
+    // The 9 text bytes follow…
+    const text = Uint8Array.from('order-123', (c) => c.charCodeAt(0));
+    expect(raw.slice(64, 73)).toEqual(text);
+    // …zero-padded to a 4-byte boundary (3 pad bytes).
+    expect(raw.slice(73, 76)).toEqual(new Uint8Array(3));
+    // The operations array count follows at the aligned offset.
+    expect(raw.slice(76, 80)).toEqual(new Uint8Array([0, 0, 0, 1]));
+    // No padding needed when the memo is already 4-byte aligned.
+    const aligned = signStellarPayment({
+      from: SOURCE_ADDRESS,
+      to: DEST_ADDRESS,
+      amount: 100n,
+      sequence: 120n,
+      fee: 100,
+      memo: 'memo1234', // 8 bytes → no padding
+    }, PRIVATE_KEY);
+    const rawAligned = Uint8Array.from(atob(aligned.raw), (c) => c.charCodeAt(0));
+    expect(rawAligned.slice(60, 64)).toEqual(new Uint8Array([0, 0, 0, 8]));
+    expect(rawAligned.slice(64, 72)).toEqual(Uint8Array.from('memo1234', (c) => c.charCodeAt(0)));
+    expect(rawAligned.slice(72, 76)).toEqual(new Uint8Array([0, 0, 0, 1])); // ops count at 72
+  });
+
+  it('signs over the memo: the signature verifies and the hash changes', () => {
+    const publicKey = ed25519.getPublicKey(PRIVATE_KEY);
+    const fromAddress = encodeStellarAddress(publicKey);
+
+    const withMemo = signStellarPayment({
+      from: fromAddress,
+      to: DEST_ADDRESS,
+      amount: 100n,
+      sequence: 120n,
+      fee: 100,
+      memo: 'order-123',
+    }, PRIVATE_KEY);
+    const withoutMemo = signStellarPayment({
+      from: fromAddress,
+      to: DEST_ADDRESS,
+      amount: 100n,
+      sequence: 120n,
+      fee: 100,
+    }, PRIVATE_KEY);
+
+    // Different network hash → the memo is covered by the signature base.
+    expect(withMemo.signingHash).not.toBe(withoutMemo.signingHash);
+
+    // The signature over the memo-bearing transaction still verifies.
+    const { sig } = splitEnvelope(withMemo.raw);
+    const signingHashBytes = Uint8Array.from(
+      withMemo.signingHash.match(/.{2}/g)!.map((h) => parseInt(h, 16)),
+    );
+    expect(ed25519.verify(sig, signingHashBytes, publicKey)).toBe(true);
+  });
+
+  it('rejects a memo over 28 bytes (multibyte counts as bytes, not chars)', () => {
+    // 29 ASCII bytes.
+    expect(() => signStellarPayment({
+      from: SOURCE_ADDRESS,
+      to: DEST_ADDRESS,
+      amount: 100n,
+      sequence: 1n,
+      fee: 100,
+      memo: 'x'.repeat(29),
+    }, PRIVATE_KEY)).toThrow('28');
+    // 15 characters but 30 UTF-8 bytes — the schema's char cap alone would
+    // let this through; the builder must enforce the byte cap.
+    expect(() => signStellarPayment({
+      from: SOURCE_ADDRESS,
+      to: DEST_ADDRESS,
+      amount: 100n,
+      sequence: 1n,
+      fee: 100,
+      memo: 'ä'.repeat(15),
+    }, PRIVATE_KEY)).toThrow('28');
+  });
+
+  it('accepts a memo at exactly 28 bytes', () => {
+    const result = signStellarPayment({
+      from: SOURCE_ADDRESS,
+      to: DEST_ADDRESS,
+      amount: 100n,
+      sequence: 120n,
+      fee: 100,
+      memo: 'x'.repeat(28),
+    }, PRIVATE_KEY);
+
+    const raw = Uint8Array.from(atob(result.raw), (c) => c.charCodeAt(0));
+    expect(raw.slice(56, 60)).toEqual(new Uint8Array([0, 0, 0, 1])); // MEMO_TEXT
+    expect(raw.slice(60, 64)).toEqual(new Uint8Array([0, 0, 0, 28]));
+  });
+
+  it('is deterministic for the same memo and changes with it', () => {
+    const base = {
+      from: SOURCE_ADDRESS,
+      to: DEST_ADDRESS,
+      amount: 100n,
+      sequence: 120n,
+      fee: 100,
+    };
+    const a = signStellarPayment({ ...base, memo: 'one' }, PRIVATE_KEY);
+    const b = signStellarPayment({ ...base, memo: 'one' }, PRIVATE_KEY);
+    const c = signStellarPayment({ ...base, memo: 'two' }, PRIVATE_KEY);
+    expect(a.raw).toBe(b.raw);
+    expect(a.raw).not.toBe(c.raw);
+  });
+});

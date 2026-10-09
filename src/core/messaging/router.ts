@@ -472,6 +472,36 @@ export async function dispatch(
           ok: true,
           data: await handlers['agent.disable'](request.payload, ctx),
         };
+      case 'networks.list':
+        return {
+          id: request.id,
+          ok: true,
+          data: await handlers['networks.list'](request.payload, ctx),
+        };
+      case 'networks.selected':
+        return {
+          id: request.id,
+          ok: true,
+          data: await handlers['networks.selected'](request.payload, ctx),
+        };
+      case 'networks.select':
+        return {
+          id: request.id,
+          ok: true,
+          data: await handlers['networks.select'](request.payload, ctx),
+        };
+      case 'networks.custom.add':
+        return {
+          id: request.id,
+          ok: true,
+          data: await handlers['networks.custom.add'](request.payload, ctx),
+        };
+      case 'networks.custom.remove':
+        return {
+          id: request.id,
+          ok: true,
+          data: await handlers['networks.custom.remove'](request.payload, ctx),
+        };
       case 'tx.pending':
         return {
           id: request.id,

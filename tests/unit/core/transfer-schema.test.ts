@@ -123,6 +123,39 @@ describe('TokenInput token selection', () => {
   });
 });
 
+describe('transfer memo (Stellar MEMO_TEXT)', () => {
+  it('accepts an optional memo up to 28 characters', () => {
+    expect(TxTransferRequest.safeParse(envelope({
+      chain: 'stellar', index: 0, to: G, amount: '1',
+    })).success).toBe(true);
+    expect(TxTransferRequest.safeParse(envelope({
+      chain: 'stellar', index: 0, to: G, amount: '1', memo: 'order-123',
+    })).success).toBe(true);
+    expect(TxTransferRequest.safeParse(envelope({
+      chain: 'stellar', index: 0, to: G, amount: '1', memo: 'x'.repeat(28),
+    })).success).toBe(true);
+  });
+
+  it('rejects a memo longer than 28 characters', () => {
+    expect(TxTransferRequest.safeParse(envelope({
+      chain: 'stellar', index: 0, to: G, amount: '1', memo: 'x'.repeat(29),
+    })).success).toBe(false);
+  });
+
+  it('keeps the memo optional and untyped on the estimate request', () => {
+    // The estimate shares TransferPayload minus the memo; a memo key in an
+    // estimate payload is stripped by zod rather than changing the estimate.
+    const result = TxEstimateRequest.safeParse({
+      ...envelope({
+        chain: 'stellar', index: 0, to: G, amount: '1', memo: 'order-123',
+      }),
+      kind: 'tx.estimate',
+    });
+    expect(result.success).toBe(true);
+    expect((result.success ? result.data : null)?.payload).not.toHaveProperty('memo');
+  });
+});
+
 describe('tx response schema (token fields + error code)', () => {
   it('accepts the new tx.estimate response fields', async () => {
     const { Response } = await import('@/core/messaging/protocol');

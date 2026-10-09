@@ -14,10 +14,30 @@ import { Icon } from '@/ui/components/Icon';
 import { Glyph } from '@/ui/components/Glyph';
 import { BrandLogo } from '@/ui/components/BrandLogo';
 import { QRCode } from '@/ui/components/QRCode';
+import { TacticalBottomNav, type TacticalTab } from '@/ui/components/TacticalBottomNav';
+import { TransactionReceiptView } from '@/ui/components/TransactionReceiptView';
+import { ScanModal, type ParsedRecipient } from '@/ui/components/ScanModal';
+import { AddressBookPicker } from '@/ui/components/AddressBookPicker';
+import { CameraSetupCard } from '@/ui/components/CameraSetupCard';
+import { baseToDecimal, nativeDecimalsFor } from '@/ui/lib/format';
+import { networkFor, networkLabel } from '@/ui/components/Dashboard';
+import { vaultExists } from '@/core/vault/storage';
+import type { IndexerTx } from '@/core/chains/indexer-service';
 import type { StellarAssetInput, TokenInputType, ZkCapability } from '@/core/messaging/protocol';
 
 const AUTO_RELOAD_KEY = 'bootAutoReloadedAt';
 const AUTO_RELOAD_WINDOW_MS = 60_000;
+
+/**
+ * Minutes remaining in the unlock window, floored at zero ("locking…" once
+ * the deadline has passed but the UI has not re-read state yet).
+ */
+function formatMinutesRemaining(unlockedUntil: number, nowMs: number): string {
+  const remainingMs = unlockedUntil - nowMs;
+  if (remainingMs <= 0) return 'locking…';
+  const minutes = Math.ceil(remainingMs / 60_000);
+  return `${minutes}m unlocked`;
+}
 
 /**
  * One automatic recovery attempt for a stale/broken background service worker.
@@ -27,9 +47,18 @@ const AUTO_RELOAD_WINDOW_MS = 60_000;
  * re-registers the SW from the current `dist/`. Guarded by a per-session
  * timestamp so it runs at most once a minute — a genuinely broken SW surfaces
  * the manual Retry / Reload buttons instead of looping.
+ *
+ * VAULT-AWARE (the early-lock fix): `chrome.runtime.reload()` also wipes
+ * `chrome.storage.session` — which is where the vault's 15-minute unlock
+ * window lives across service-worker evictions. Auto-reloading while a vault
+ * EXISTS would therefore lock the user out seconds into their session. So the
+ * reload fires only when no vault exists (nothing to lose); otherwise the
+ * error screen with manual Retry is shown and the session survives.
  */
 async function maybeAutoReload(): Promise<boolean> {
   try {
+    const hasVault = await vaultExists();
+    if (hasVault) return false;
     const stored = await chrome.storage.session.get(AUTO_RELOAD_KEY);
     const last = stored[AUTO_RELOAD_KEY] as number | undefined;
     const now = Date.now();
@@ -59,6 +88,7 @@ export default function App() {
     error,
     accounts,
     zkCapability,
+    unlockedUntil,
     pendingConnection,
     pendingApproval,
     pendingX402Payment,
@@ -81,6 +111,8 @@ export default function App() {
     resolvePendingX402,
     loadPendingGrantRequest,
     resolvePendingGrantRequest,
+    networks,
+    selectedNetworks,
   } = useWallet();
 
   const [step, setStep] = useState<OnboardingStep>('welcome');
@@ -92,6 +124,13 @@ export default function App() {
   const [passphraseError, setPassphraseError] = useState<string | null>(null);
   const [unlockPassphrase, setUnlockPassphrase] = useState('');
   const [unlockError, setUnlockError] = useState<string | null>(null);
+  /** The store's `unlockedUntil`, polled so the header countdown stays live. */
+  const [nowMs, setNowMs] = useState(Date.now());
+  useEffect(() => {
+    if (unlockedUntil === null) return;
+    const id = window.setInterval(() => setNowMs(Date.now()), 20_000);
+    return () => window.clearInterval(id);
+  }, [unlockedUntil]);
   /**
    * Bumped on every failed unlock so the shake animation replays. React reuses
    * the DOM node otherwise, and re-applying the same class to an unchanged
@@ -104,6 +143,9 @@ export default function App() {
   const [view, setView] = useState<'accounts' | 'send' | 'receive' | 'import'>('accounts');
   const [sendTo, setSendTo] = useState('');
   const [sendAmount, setSendAmount] = useState('');
+  /** Stellar MEMO_TEXT, sent with the transfer. Lifted here so a scanned
+   *  payment URI (stellar:…?memo=…) can pre-fill it. */
+  const [sendMemo, setSendMemo] = useState('');
   const [sendAsset, setSendAsset] = useState<StellarAssetInput | undefined>(undefined);
   const [sendToken, setSendToken] = useState<TokenInputType | undefined>(undefined);
   const [sendFee, setSendFee] = useState<string | null>(null);
@@ -116,6 +158,8 @@ export default function App() {
   const [importPass1, setImportPass1] = useState('');
   const [importPass2, setImportPass2] = useState('');
   const [importError, setImportError] = useState<string | null>(null);
+  const [selectedTx, setSelectedTx] = useState<IndexerTx | null>(null);
+  const [scanModalOpen, setScanModalOpen] = useState(false);
 
   // Refresh vault state on mount
   useEffect(() => {
@@ -323,6 +367,7 @@ export default function App() {
     setSendAccount(acc);
     setSendTo('');
     setSendAmount('');
+    setSendMemo('');
     setSendAsset(undefined);
     setSendToken(undefined);
     setSendFee(null);
@@ -369,7 +414,7 @@ export default function App() {
     [sendAccount, sendTo, sendAmount, sendAsset, sendToken, estimateTransfer],
   );
 
-  const handleSendConfirm = async () => {
+  const handleSendConfirm = async (memo?: string) => {
     if (sendAccount === null) return;
     setSendStatus('sending');
     try {
@@ -380,6 +425,7 @@ export default function App() {
         sendAmount,
         sendAsset,
         sendToken ?? tokenFromAsset(sendAsset),
+        memo,
       );
       setSendHash(hash);
       setSendStatus('done');
@@ -391,6 +437,27 @@ export default function App() {
   const startReceive = (idx: number) => {
     setReceiveIdx(idx);
     setView('receive');
+  };
+
+  /**
+   * A scanned/pasted recipient lands here from either ScanModal mount
+   * (dashboard or send form). A payment URI contributes address + amount +
+   * memo; plain text contributes the address alone. When entering the send
+   * flow fresh (no account selected yet) the form is reset first, so the
+   * URI's amount/memo are not clobbered by the reset.
+   */
+  const handleScanResult = (result: ParsedRecipient) => {
+    const enteringFresh = sendAccount === null;
+    if (enteringFresh) startSend(0);
+    setSendTo(result.address);
+    setSendAmount(
+      enteringFresh || sendAmount.length === 0 ? (result.amount ?? '') : sendAmount,
+    );
+    setSendMemo(
+      enteringFresh || sendMemo.length === 0 ? (result.memo ?? '') : sendMemo,
+    );
+    setView('send');
+    setScanModalOpen(false);
   };
 
   const handleImportSubmit = async () => {
@@ -468,6 +535,11 @@ export default function App() {
           <p className="font-body text-sm text-content-secondary text-center max-w-xs">
             {t('onboarding.walletCreatedHint')}
           </p>
+          {/* One-time camera pre-grant: allow it here and every future QR scan
+              starts instantly (Chrome remembers the grant for the extension). */}
+          <div className="w-full max-w-xs">
+            <CameraSetupCard />
+          </div>
           <Button fullWidth onClick={handleFinishOnboarding}>
             {t('onboarding.continue')}
           </Button>
@@ -521,38 +593,112 @@ export default function App() {
     );
   }
 
-  // ── Unlocked — send / receive / accounts / import ──────────────────────
+  const handleTabSelect = (tab: TacticalTab) => {
+    if (tab === 'home') {
+      setSelectedTx(null);
+      setView('accounts');
+    } else if (tab === 'send') {
+      if (accounts.length === 0) return; // nothing to send from; stay put
+      setSelectedTx(null);
+      startSend(0);
+    } else if (tab === 'scan') {
+      setScanModalOpen(true);
+    } else if (tab === 'receive') {
+      if (accounts.length === 0) return; // no address to show; stay put
+      setSelectedTx(null);
+      startReceive(0);
+    } else if (tab === 'settings') {
+      void chrome.runtime.openOptionsPage();
+    }
+  };
+
+  // ── Unlocked — send / receive / accounts / import / receipt ────────────
   if (vaultState === 'unlocked') {
+    if (selectedTx !== null) {
+      const decimals = nativeDecimalsFor(selectedTx.chain);
+      const symbol = selectedTx.chain === 'stellar' ? 'XLM' : selectedTx.chain === 'solana' ? 'SOL' : 'ETH';
+      // Direction is derived from the wallet's own addresses: an incoming
+      // payment must render as a credit, not a debit.
+      const ownedAddresses = new Set(accounts.map((a) => a.address));
+      const direction: 'sent' | 'received' =
+        ownedAddresses.has(selectedTx.to) && !ownedAddresses.has(selectedTx.from)
+          ? 'received'
+          : 'sent';
+      let amountFormatted = selectedTx.amount;
+      try {
+        amountFormatted = baseToDecimal(BigInt(selectedTx.amount), decimals, 6);
+      } catch {
+        amountFormatted = selectedTx.amount;
+      }
+
+      return (
+        <TransactionReceiptView
+          receipt={{
+            hash: selectedTx.hash,
+            chain: selectedTx.chain,
+            from: selectedTx.from,
+            to: selectedTx.to,
+            amount: amountFormatted,
+            symbol,
+            networkName: networkLabel(selectedTx.chain, networks, selectedNetworks).toUpperCase(),
+            timestamp: selectedTx.timestamp,
+            status: selectedTx.status === 'confirmed' ? 'completed' : selectedTx.status,
+            direction,
+          }}
+          onBack={() => setSelectedTx(null)}
+        />
+      );
+    }
+
     if (view === 'send') {
       return (
-        <SendForm
-          account={sendAccount ?? accounts[0]!}
-          sendTo={sendTo}
-          sendAmount={sendAmount}
-          sendAsset={sendAsset}
-          sendToken={sendToken}
-          sendFee={sendFee}
-          sendDecimals={sendDecimals}
-          sendSpendable={sendSpendable}
-          sendStatus={sendStatus}
-          sendHash={sendHash}
-          isLoading={isLoading}
-          error={error}
-          onToChange={setSendTo}
-          onAmountChange={setSendAmount}
-          onAssetChange={setSendAsset}
-          onTokenChange={setSendToken}
-          onEstimate={handleSendFee}
-          onConfirm={handleSendConfirm}
-          onBack={() => setView('accounts')}
-          onClearError={clearError}
-        />
+        <>
+          <SendForm
+            account={sendAccount ?? accounts[0]!}
+            sendTo={sendTo}
+            sendAmount={sendAmount}
+            sendMemo={sendMemo}
+            sendAsset={sendAsset}
+            sendToken={sendToken}
+            sendFee={sendFee}
+            sendDecimals={sendDecimals}
+            sendSpendable={sendSpendable}
+            sendStatus={sendStatus}
+            sendHash={sendHash}
+            isLoading={isLoading}
+            error={error}
+            onToChange={setSendTo}
+            onAmountChange={setSendAmount}
+            onMemoChange={setSendMemo}
+            onAssetChange={setSendAsset}
+            onTokenChange={setSendToken}
+            onEstimate={handleSendFee}
+            onConfirm={() => void handleSendConfirm(sendMemo)}
+            onBack={() => setView('accounts')}
+            onClearError={clearError}
+            onOpenScan={() => setScanModalOpen(true)}
+            onTabSelect={handleTabSelect}
+          />
+          {/* Mounted here too: the form's camera button must actually open
+              the scanner, not just flip a flag no modal was listening to. */}
+          <ScanModal
+            isOpen={scanModalOpen}
+            onClose={() => setScanModalOpen(false)}
+            onScanResult={handleScanResult}
+          />
+        </>
       );
     }
     if (view === 'receive') {
       const acc = accounts[receiveIdx];
       if (acc === undefined) return null;
-      return <ReceiveView account={acc} onBack={() => setView('accounts')} />;
+      return (
+        <ReceiveView
+          account={acc}
+          onBack={() => setView('accounts')}
+          onTabSelect={handleTabSelect}
+        />
+      );
     }
     if (view === 'import') {
       return (
@@ -571,31 +717,81 @@ export default function App() {
       );
     }
 
-    // Default: Dashboard with portfolio, assets, and recent tx
+    // Default: Dashboard matching Screenshot 1 & 2
     return (
-      <main className="flex min-h-[600px] w-[400px] flex-col gap-3 p-4">
-        <header className="flex items-baseline justify-between">
-          <h1 className="font-display text-lg font-bold text-content-primary">{t('brand')}</h1>
-          <span className="font-mono text-xs text-content-tertiary">{t('version')}</span>
+      <main className="flex min-h-[600px] w-[400px] flex-col bg-surface-900 text-content-primary">
+        {/* Top Header matching Screenshot 1 */}
+        <header className="flex shrink-0 items-center justify-between border-b border-surface-800/80 px-4 py-3">
+          <div className="flex items-center gap-2">
+            <BrandLogo size="md" className="h-6 w-6" />
+            <h1 className="font-display text-base font-extrabold tracking-wider text-white uppercase">
+              {t('brand')}
+            </h1>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {/* Session countdown: the live minutes remaining in the 15-minute
+                unlock window, so the auto-lock is visible instead of a
+                surprise. Hidden while the store has no deadline. */}
+            {unlockedUntil !== null && (
+              <span
+                className="flex items-center gap-1 rounded-lg border border-surface-700/80 bg-surface-800/80 px-2 py-1 font-mono text-[10px] text-content-tertiary"
+                title="Time until the wallet auto-locks"
+              >
+                <Glyph name="lock" className="h-3 w-3 text-accent-500/70" />
+                {formatMinutesRemaining(unlockedUntil, nowMs)}
+              </span>
+            )}
+
+            {/* Account pill */}
+            <div className="flex items-center gap-1.5 rounded-lg border border-surface-700/80 bg-surface-800/80 px-2.5 py-1 text-xs font-mono text-content-primary">
+              <Glyph name="user" className="h-3.5 w-3.5 text-accent-500" />
+              <span>Account 1</span>
+              <Glyph name="chevron-down" className="h-3 w-3 text-content-tertiary" />
+            </div>
+
+            {/* Sunburst Settings button */}
+            <button
+              type="button"
+              onClick={() => void chrome.runtime.openOptionsPage()}
+              aria-label="Settings"
+              className="rounded-lg p-1 text-content-secondary hover:bg-surface-800 hover:text-white transition-colors"
+            >
+              <Glyph name="sun" className="h-4 w-4" />
+            </button>
+          </div>
         </header>
 
-        <TestnetBanner />
+        {/* Scrollable Main Surface */}
+        <div className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-3">
+          <TestnetBanner />
 
-        <Dashboard
-          accounts={accounts}
-          onSend={startSend}
-          onReceive={startReceive}
-          onImport={() => setView('import')}
-          onLock={handleLock}
-        />
+          {/* Dismissible camera pre-grant — hidden once granted or dismissed. */}
+          <CameraSetupCard />
 
-        <ZkResult capability={zkCapability} />
+          <Dashboard
+            accounts={accounts}
+            onSend={startSend}
+            onReceive={startReceive}
+            onImport={() => setView('import')}
+            onLock={handleLock}
+            onScan={() => setScanModalOpen(true)}
+            onSelectTx={(tx) => setSelectedTx(tx)}
+            onSeeAllActivity={() => void chrome.runtime.openOptionsPage()}
+          />
 
-        <div className="mt-auto">
-          <Button variant="ghost" fullWidth onClick={() => void chrome.runtime.openOptionsPage()}>
-            Settings
-          </Button>
+          <ZkResult capability={zkCapability} />
         </div>
+
+        {/* Tactical Bottom Navigation Bar */}
+        <TacticalBottomNav activeTab="home" onSelectTab={handleTabSelect} />
+
+        {/* Tactical QR Scan Modal */}
+        <ScanModal
+          isOpen={scanModalOpen}
+          onClose={() => setScanModalOpen(false)}
+          onScanResult={handleScanResult}
+        />
       </main>
     );
   }
@@ -705,7 +901,7 @@ export default function App() {
   // Step 3: Passphrase
   if (step === 'passphrase') {
     return (
-      <main className="flex min-h-[600px] w-[400px] flex-col gap-4 p-4">
+      <main className="flex min-h-[600px] w-[400px] flex-col gap-4 p-4 animate-fade-in-up">
         <header className="flex items-baseline justify-between">
           <h1 className="font-display text-lg font-bold text-content-primary">{t('brand')}</h1>
           <span className="font-mono text-xs text-content-tertiary">{t('version')}</span>
@@ -769,7 +965,7 @@ export default function App() {
     const words = phrase.split(' ');
 
     return (
-      <main className="flex min-h-[600px] w-[400px] flex-col gap-4 p-4">
+      <main className="flex min-h-[600px] w-[400px] flex-col gap-4 p-4 animate-fade-in-up">
         <header className="flex items-baseline justify-between">
           <h1 className="font-display text-lg font-bold text-content-primary">{t('brand')}</h1>
           <span className="font-mono text-xs text-content-tertiary">{t('version')}</span>
@@ -840,7 +1036,7 @@ export default function App() {
 
   // Step 1: Welcome
   return (
-    <main className="flex min-h-[600px] w-[400px] flex-col gap-3 p-4">
+    <main className="flex min-h-[600px] w-[400px] flex-col gap-3 p-4 animate-fade-in-up">
       <header className="flex items-baseline justify-between">
         <h1 className="font-display text-lg font-bold text-content-primary">{t('brand')}</h1>
         <span className="font-mono text-xs text-content-tertiary">{t('version')}</span>
@@ -942,6 +1138,7 @@ function SendForm({
   account,
   sendTo,
   sendAmount,
+  sendMemo,
   sendAsset,
   sendToken,
   sendFee,
@@ -953,16 +1150,20 @@ function SendForm({
   error,
   onToChange,
   onAmountChange,
+  onMemoChange,
   onAssetChange,
   onTokenChange,
   onEstimate,
   onConfirm,
   onBack,
   onClearError,
+  onOpenScan,
+  onTabSelect,
 }: {
   account: AccountView;
   sendTo: string;
   sendAmount: string;
+  sendMemo: string;
   sendAsset: StellarAssetInput | undefined;
   sendToken: TokenInputType | undefined;
   sendFee: string | null;
@@ -974,12 +1175,15 @@ function SendForm({
   error: string | null;
   onToChange: (v: string) => void;
   onAmountChange: (v: string) => void;
+  onMemoChange: (v: string) => void;
   onAssetChange: (a: StellarAssetInput | undefined) => void;
   onTokenChange: (t: TokenInputType | undefined) => void;
   onEstimate: (token?: TokenInputType) => Promise<void>;
   onConfirm: () => void;
   onBack: () => void;
   onClearError: () => void;
+  onOpenScan?: () => void;
+  onTabSelect?: (tab: TacticalTab) => void;
 }) {
   const isStellar = account.chain === 'stellar';
   const nativeSymbol =
@@ -987,9 +1191,13 @@ function SendForm({
   const feeSymbol =
     account.chain === 'evm' ? 'Gwei' : account.chain === 'solana' ? 'lamports' : 'stroops';
 
-  // Normalize the current selection into a TokenInput the estimate/confirm use.
-  // For EVM/Solana the default (sendToken undefined) is the native token.
-  // Memoized so its identity is stable, keeping the debounce effect stable too.
+  const { balances, networks, selectedNetworks } = useWallet();
+  // The live network name for this account's chain — mainnet or testnet,
+  // whichever is selected. Receipts and headers must never hardcode TESTNET.
+  const networkName = networkLabel(account.chain, networks, selectedNetworks).toUpperCase();
+  const [addressBookOpen, setAddressBookOpen] = useState(false);
+
+  // Normalize selection into TokenInput
   const resolvedToken: TokenInputType | undefined = useMemo<TokenInputType | undefined>(
     () =>
       isStellar
@@ -1007,9 +1215,7 @@ function SendForm({
         ? 'Token'
         : nativeSymbol;
 
-  // Auto-estimate: after the recipient/amount/token settle (debounced), run the
-  // estimate so the fee preview appears without a manual button. Any change
-  // resets the flow back to 'fee' until a fresh estimate lands.
+  // Auto-estimate
   const ready =
     sendTo.length > 0 &&
     sendAmount.length > 0 &&
@@ -1026,9 +1232,6 @@ function SendForm({
     return () => window.clearTimeout(id);
   }, [sendTo, sendAmount, resolvedToken, ready, sendStatus, onEstimate]);
 
-  // Spendable-balance gate. For a native send, amount + fee must fit the native
-  // balance. For a token send, the amount must fit the token balance (fee is a
-  // separate native-payment concern the background enforces at submit).
   const insufficientBalance =
     sendDecimals !== null && sendSpendable !== null && sendFee !== null && sendAmount.length > 0
       ? (() => {
@@ -1062,172 +1265,319 @@ function SendForm({
     ready === false ||
     insufficientBalance;
 
+  // ── Real available balance ──────────────────────────────────────────────
+  // The estimate's spendable is authoritative once present (token-aware, and
+  // exactly what the backend checks before signing). Before that: the live
+  // store balance, but only for the native token — the native balance says
+  // nothing about an ERC20/SPL/issued balance, so those show "—" until the
+  // estimate fills it in. Never a placeholder constant.
+  const isNativeToken = resolvedToken === undefined || resolvedToken.kind === 'native';
+  const estimateKnown = sendSpendable !== null && sendDecimals !== null;
+  const storeBalance = balances[`${account.chain}:${account.address}`] ?? 0n;
+  const spendableBase = estimateKnown
+    ? BigInt(sendSpendable!)
+    : isNativeToken
+      ? storeBalance
+      : null;
+  const spendableDecimals = sendDecimals ?? nativeDecimalsFor(account.chain);
+  const spendableDisplay =
+    spendableBase !== null ? baseToDecimal(spendableBase, spendableDecimals, 6) : null;
+
+  // Percentage / MAX pre-fills, computed with exact bigint math on the same
+  // spendable the backend enforces. MAX reserves the network fee for native
+  // sends (fee is drawn from the same balance); token sends take the full
+  // token balance (the fee is paid from native separately).
+  const feeBase = isNativeToken && sendFee !== null ? (() => { try { return BigInt(sendFee); } catch { return 0n; } })() : 0n;
+
+  const handlePercentage = (percent: 'max' | number) => {
+    if (spendableBase === null) return;
+    let base: bigint;
+    if (percent === 'max') {
+      base = spendableBase > feeBase ? spendableBase - feeBase : 0n;
+    } else {
+      base = (spendableBase * BigInt(Math.round(percent * 100))) / 100n;
+    }
+    onAmountChange(baseToDecimal(base, spendableDecimals, spendableDecimals));
+    onClearError();
+  };
+
+  const handlePasteAddress = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text.trim().length > 0) {
+        onToChange(text.trim());
+        onClearError();
+      }
+    } catch {
+      // Ignore
+    }
+  };
+
   if (sendStatus === 'done' && sendHash !== null) {
     return (
-      <main className="flex min-h-[600px] w-[400px] flex-col gap-4 p-4">
-        <header className="flex items-baseline justify-between">
-          <h1 className="font-display text-lg font-bold text-content-primary">{t('brand')}</h1>
-          <span className="font-mono text-xs text-content-tertiary">{t('version')}</span>
-        </header>
-        <div className="flex flex-1 flex-col items-center justify-center gap-4">
-          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-success/20">
-            <Icon name="check" className="h-6 w-6" />
-          </div>
-          <h2 className="font-display text-lg font-semibold text-content-primary">Sent!</h2>
-          <p className="font-mono text-xs text-content-tertiary break-all text-center max-w-xs">
-            {sendHash}
-          </p>
-          <Button fullWidth onClick={onBack}>
-            Back to accounts
-          </Button>
-        </div>
-      </main>
+      <div className="relative">
+        <span className="sr-only">Sent!</span>
+        <TransactionReceiptView
+          receipt={{
+            hash: sendHash,
+            chain: account.chain,
+            from: account.address,
+            to: sendTo,
+            amount: sendAmount,
+            symbol: assetLabel,
+            networkName,
+            timestamp: new Date().toISOString(),
+          }}
+          onBack={onBack}
+        />
+      </div>
     );
   }
 
   return (
-    <main className="flex min-h-[600px] w-[400px] animate-fade-in flex-col gap-4 p-4">
-      <header className="flex items-baseline justify-between">
-        <h1 className="font-display text-lg font-bold text-content-primary">{t('brand')}</h1>
-        <span className="font-mono text-xs text-content-tertiary">{t('version')}</span>
+    <main className="flex min-h-[600px] w-[400px] flex-col bg-surface-900 text-content-primary animate-fade-in-up">
+      {/* Top Header matching Screenshot 4 */}
+      <header className="flex shrink-0 items-center justify-between border-b border-surface-800/80 px-4 py-3">
+        <button
+          type="button"
+          onClick={onBack}
+          aria-label="Back"
+          className="flex items-center gap-1.5 font-mono text-xs font-semibold text-content-secondary hover:text-white transition-colors"
+        >
+          <Glyph name="arrow-left" className="h-4 w-4" />
+          <span>BACK</span>
+        </button>
+
+        <h1 className="font-display text-sm font-bold tracking-widest text-white uppercase">
+          SEND PAYMENT
+        </h1>
+
+        <div className="w-12" />
       </header>
 
-      <p className="font-body text-xs text-content-secondary">
-        Send from <span className="font-mono">{account.chain}</span> (#{account.index})
-      </p>
+      {/* Main Content Form */}
+      <div className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-3">
+        {/* SENDING FROM Card matching Screenshot 4 */}
+        <div className="rounded-xl border border-surface-700/80 bg-surface-800/80 p-3.5 shadow-raised flex flex-col gap-2">
+          <div className="flex items-start justify-between">
+            <div>
+              <span className="font-mono text-[10px] tracking-wider text-content-tertiary uppercase">
+                SENDING FROM
+              </span>
+              <span className="sr-only">Send from {account.chain} (#{account.index})</span>
+              <div className="mt-0.5 font-display text-sm font-bold tracking-wider text-accent-500 uppercase">
+                {networkName}
+              </div>
+            </div>
+            <BrandLogo size="md" className="h-7 w-7" />
+          </div>
 
-      <div className="flex flex-1 flex-col gap-3">
-        <Input
-          label="Recipient address"
-          placeholder="Recipient address"
-          value={sendTo}
-          onChange={(e) => { onToChange(e.target.value); onClearError(); }}
-          disabled={isLoading || sendStatus === 'sending'}
-        />
+          <div className="flex items-center justify-between border-t border-surface-700/60 pt-2 font-mono text-xs">
+            <span className="text-content-tertiary">Available Balance</span>
+            <span className="text-content-primary font-semibold">
+              {spendableDisplay !== null ? `≈ ${spendableDisplay} ${assetLabel}` : '— (estimating…)'}
+            </span>
+          </div>
+        </div>
 
-        {isStellar && (
-          <div className="flex flex-col gap-1">
-            <label className="font-body text-xs text-content-secondary">Asset</label>
-            <div className="flex gap-2">
+        {/* Recipient Address Section matching Screenshot 4 */}
+        <div>
+          <label
+            htmlFor="recipient-address"
+            className="block font-mono text-[10px] font-semibold tracking-wider text-content-tertiary uppercase mb-1.5"
+          >
+            {assetLabel} RECIPIENT ADDRESS
+          </label>
+          <div className="relative">
+            <input
+              id="recipient-address"
+              type="text"
+              placeholder="Recipient address"
+              aria-label="Recipient address"
+              value={sendTo}
+              onChange={(e) => {
+                onToChange(e.target.value);
+                onClearError();
+              }}
+              disabled={isLoading || sendStatus === 'sending'}
+              className="w-full rounded-xl border border-surface-700 bg-surface-800/90 px-3 py-2.5 pr-24 font-mono text-xs text-content-primary placeholder:text-content-tertiary focus:border-accent-500 outline-none"
+            />
+            <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1.5 text-accent-500">
               <button
                 type="button"
-                onClick={() => { onAssetChange({ type: 'native' }); onClearError(); }}
-                className={`flex-1 rounded-lg border px-3 py-2 font-body text-xs ${
-                  sendAsset === undefined || sendAsset.type === 'native'
-                    ? 'border-accent-500 bg-accent-500/10 text-content-primary'
-                    : 'border-surface-700 text-content-secondary'
-                }`}
-                disabled={isLoading || sendStatus === 'sending'}
+                onClick={() => setAddressBookOpen(true)}
+                aria-label="Address book"
+                title="Address book"
+                className="p-1 hover:text-accent-400 transition-colors"
               >
-                Native (XLM)
+                <Glyph name="card" className="h-4 w-4" />
               </button>
               <button
                 type="button"
-                onClick={() => { onAssetChange({ type: 'issued', code: '', issuer: '' }); onClearError(); }}
-                className={`flex-1 rounded-lg border px-3 py-2 font-body text-xs ${
-                  sendAsset?.type === 'issued'
-                    ? 'border-accent-500 bg-accent-500/10 text-content-primary'
-                    : 'border-surface-700 text-content-secondary'
-                }`}
-                disabled={isLoading || sendStatus === 'sending'}
+                onClick={onOpenScan}
+                aria-label="Scan QR"
+                title="Scan QR"
+                className="p-1 hover:text-accent-400 transition-colors"
               >
-                Testnet token
+                <Glyph name="camera" className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={handlePasteAddress}
+                aria-label="Paste address"
+                title="Paste address"
+                className="p-1 hover:text-accent-400 transition-colors"
+              >
+                <Glyph name="copy" className="h-4 w-4" />
               </button>
             </div>
+          </div>
+        </div>
+
+        {/* Asset / Token selection for non-Stellar or multi-asset */}
+        {isStellar && (
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => { onAssetChange({ type: 'native' }); onClearError(); }}
+              className={`flex-1 rounded-lg border py-1.5 font-mono text-xs ${
+                sendAsset === undefined || sendAsset.type === 'native'
+                  ? 'border-accent-500 bg-accent-500/15 text-accent-400 font-semibold'
+                  : 'border-surface-700 bg-surface-800 text-content-tertiary'
+              }`}
+            >
+              Native (XLM)
+            </button>
+            <button
+              type="button"
+              onClick={() => { onAssetChange({ type: 'issued', code: 'USDC', issuer: '' }); onClearError(); }}
+              className={`flex-1 rounded-lg border py-1.5 font-mono text-xs ${
+                sendAsset?.type === 'issued'
+                  ? 'border-accent-500 bg-accent-500/15 text-accent-400 font-semibold'
+                  : 'border-surface-700 bg-surface-800 text-content-tertiary'
+              }`}
+            >
+              Issued token
+            </button>
           </div>
         )}
 
         {!isStellar && (
-          <div className="flex flex-col gap-1">
-            <label className="font-body text-xs text-content-secondary">Token</label>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => { onTokenChange(undefined); onClearError(); }}
-                className={`flex-1 rounded-lg border px-3 py-2 font-body text-xs ${
-                  sendToken === undefined || sendToken.kind === 'native'
-                    ? 'border-accent-500 bg-accent-500/10 text-content-primary'
-                    : 'border-surface-700 text-content-secondary'
-                }`}
-                disabled={isLoading || sendStatus === 'sending'}
-              >
-                Native ({nativeSymbol})
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  onTokenChange(account.chain === 'evm' ? { kind: 'erc20', address: '' } : { kind: 'spl', mint: '' });
-                  onClearError();
-                }}
-                className={`flex-1 rounded-lg border px-3 py-2 font-body text-xs ${
-                  sendToken?.kind === 'erc20' || sendToken?.kind === 'spl'
-                    ? 'border-accent-500 bg-accent-500/10 text-content-primary'
-                    : 'border-surface-700 text-content-secondary'
-                }`}
-                disabled={isLoading || sendStatus === 'sending'}
-              >
-                Token
-              </button>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => { onTokenChange(undefined); onClearError(); }}
+              className={`flex-1 rounded-lg border py-1.5 font-mono text-xs ${
+                sendToken === undefined || sendToken.kind === 'native'
+                  ? 'border-accent-500 bg-accent-500/15 text-accent-400 font-semibold'
+                  : 'border-surface-700 bg-surface-800 text-content-tertiary'
+              }`}
+            >
+              Native ({nativeSymbol})
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                onTokenChange(account.chain === 'evm' ? { kind: 'erc20', address: '' } : { kind: 'spl', mint: '' });
+                onClearError();
+              }}
+              className={`flex-1 rounded-lg border py-1.5 font-mono text-xs ${
+                sendToken?.kind === 'erc20' || sendToken?.kind === 'spl'
+                  ? 'border-accent-500 bg-accent-500/15 text-accent-400 font-semibold'
+                  : 'border-surface-700 bg-surface-800 text-content-tertiary'
+              }`}
+            >
+              Token
+            </button>
+          </div>
+        )}
+
+        {/* Amount Section matching Screenshot 4 */}
+        <div>
+          <div className="flex items-center justify-between mb-1.5">
+            <label
+              htmlFor="send-amount"
+              className="font-mono text-[10px] font-semibold tracking-wider text-content-tertiary uppercase"
+            >
+              AMOUNT <span className="sr-only">Amount ({assetLabel})</span>
+            </label>
+          </div>
+
+          <div className="flex items-center justify-between rounded-xl border border-surface-700 bg-surface-800/90 px-3 py-2.5">
+            <input
+              id="send-amount"
+              type="text"
+              inputMode="decimal"
+              placeholder="0.00"
+              aria-label={`Amount (${assetLabel})`}
+              value={sendAmount}
+              onChange={(e) => {
+                onAmountChange(e.target.value);
+                onClearError();
+              }}
+              disabled={isLoading || sendStatus === 'sending'}
+              className="w-full bg-transparent font-display text-2xl font-bold text-white placeholder:text-content-tertiary outline-none"
+            />
+            <div className="flex shrink-0 items-center gap-1 rounded-lg bg-surface-700/80 px-2.5 py-1 font-mono text-xs font-bold text-accent-500">
+              <span>{assetLabel}</span>
+              <Glyph name="chevron-down" className="h-3 w-3" />
             </div>
           </div>
-        )}
+        </div>
 
-        {!isStellar && sendToken?.kind === 'erc20' && (
-          <Input
-            label="ERC-20 contract (0x…)"
-            placeholder="0x…"
-            value={sendToken.address ?? ''}
-            onChange={(e) => { onTokenChange({ kind: 'erc20', address: e.target.value }); onClearError(); }}
-            disabled={isLoading || sendStatus === 'sending'}
-          />
-        )}
+        {/* Percentage Chips matching Screenshot 4.
+            Real pre-fills from the live spendable; MAX reserves the network
+            fee for native sends. Disabled until a real spendable is known. */}
+        <div className="grid grid-cols-4 gap-2">
+          {[
+            { label: '25%', value: 0.25 },
+            { label: '50%', value: 0.5 },
+            { label: '75%', value: 0.75 },
+            { label: 'MAX', value: 'max' as const },
+          ].map((chip) => (
+            <button
+              key={chip.label}
+              type="button"
+              onClick={() => handlePercentage(chip.value)}
+              disabled={spendableBase === null}
+              className="rounded-lg border border-surface-700/80 bg-surface-800/80 py-1.5 font-mono text-xs font-semibold text-content-secondary transition-colors hover:border-accent-500/50 hover:text-white active:scale-95 disabled:opacity-40"
+            >
+              {chip.label}
+            </button>
+          ))}
+        </div>
 
-        {!isStellar && sendToken?.kind === 'spl' && (
-          <Input
-            label="SPL mint"
-            placeholder="SPL token mint"
-            value={sendToken.mint ?? ''}
-            onChange={(e) => { onTokenChange({ kind: 'spl', mint: e.target.value }); onClearError(); }}
-            disabled={isLoading || sendStatus === 'sending'}
-          />
-        )}
-
-        {sendAsset?.type === 'issued' && (
-          <div className="flex flex-col gap-2">
-            <Input
-              label="Asset code"
-              placeholder="e.g. USDC"
-              value={sendAsset.code}
+        {/* MEMO (OPTIONAL) — Stellar only (the only chain with transaction
+            memos in this wallet), and actually sent: it is attached as
+            MEMO_TEXT by the background's XDR builder. */}
+        {isStellar && (
+          <div>
+            <label
+              htmlFor="send-memo"
+              className="block font-mono text-[10px] font-semibold tracking-wider text-content-tertiary uppercase mb-1.5"
+            >
+              MEMO (OPTIONAL) <span className="normal-case">· max 28 bytes</span>
+            </label>
+            <input
+              id="send-memo"
+              type="text"
+              placeholder="Add a note for this transaction"
+              aria-label="Memo"
+              maxLength={28}
+              value={sendMemo}
               onChange={(e) => {
-                onAssetChange({ type: 'issued', code: e.target.value.toUpperCase(), issuer: sendAsset.issuer });
+                onMemoChange(e.target.value);
                 onClearError();
               }}
               disabled={isLoading || sendStatus === 'sending'}
-            />
-            <Input
-              label="Issuer address (G...)"
-              placeholder="G..."
-              value={sendAsset.issuer}
-              onChange={(e) => {
-                onAssetChange({ type: 'issued', code: sendAsset.code, issuer: e.target.value });
-                onClearError();
-              }}
-              disabled={isLoading || sendStatus === 'sending'}
+              className="w-full rounded-xl border border-surface-700 bg-surface-800/90 px-3 py-2 font-mono text-xs text-content-primary placeholder:text-content-tertiary focus:border-accent-500 outline-none"
             />
           </div>
         )}
 
-        <Input
-          label={`Amount (${assetLabel})`}
-          placeholder={`0.0 ${assetLabel}`}
-          value={sendAmount}
-          onChange={(e) => { onAmountChange(e.target.value); onClearError(); }}
-          disabled={isLoading || sendStatus === 'sending'}
-          inputMode="decimal"
-        />
-
+        {/* Feedback: Fee, Insufficient Balance, Error */}
         {sendFee !== null && (
-          <p className="font-body text-xs text-content-secondary">
+          <p className="font-mono text-xs text-content-secondary">
             Estimated fee: {sendFee} {feeSymbol}
           </p>
         )}
@@ -1242,35 +1592,61 @@ function SendForm({
           <p className="font-body text-xs text-danger">{error}</p>
         )}
 
-        <div className="flex gap-2 mt-auto">
-          <Button variant="secondary" onClick={onBack} disabled={isLoading}>
-            Back
+        {/* Main CTA button matching Screenshot 4 */}
+        <div className="mt-auto pt-2">
+          <Button
+            fullWidth
+            onClick={onConfirm}
+            disabled={disableSend}
+            aria-label="Send"
+            className="py-3 font-mono text-xs font-bold uppercase tracking-wider bg-accent-500 text-surface-900 shadow-md hover:bg-accent-400 active:scale-98"
+          >
+            {isLoading ? 'Sending…' : 'CONTINUE'}
           </Button>
-          {sendStatus !== 'done' && (
-            <Button fullWidth onClick={onConfirm} disabled={disableSend}>
-              {isLoading ? 'Sending…' : 'Send'}
-            </Button>
-          )}
         </div>
       </div>
+
+      {/* Tactical Bottom Navigation Bar */}
+      <TacticalBottomNav activeTab="send" onSelectTab={onTabSelect ?? (() => {})} />
+
+      {/* Address Book Picker — real saved entries for this chain */}
+      <AddressBookPicker
+        isOpen={addressBookOpen}
+        chain={account.chain}
+        onClose={() => setAddressBookOpen(false)}
+        onSelect={(address) => {
+          onToChange(address);
+          onClearError();
+        }}
+      />
     </main>
   );
 }
 
-// ── Receive view ────────────────────────────────────────────────────────
+// ── Receive view matching Screenshot 5 ──────────────────────────────────
 function ReceiveView({
   account,
   onBack,
+  onTabSelect,
 }: {
   account: AccountView;
   onBack: () => void;
+  onTabSelect?: (tab: TacticalTab) => void;
 }) {
-  const { requestFaucet } = useWallet();
+  const { requestFaucet, networks, selectedNetworks } = useWallet();
   const [faucetState, setFaucetState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [faucetError, setFaucetError] = useState<string | null>(null);
-  const [faucetTxHash, setFaucetTxHash] = useState<string | null>(null);
-  const [faucetOpened, setFaucetOpened] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [requestAmount, setRequestAmount] = useState('');
+  const [linkCopied, setLinkCopied] = useState(false);
+
+  const nativeSymbol =
+    account.chain === 'evm' ? 'ETH' : account.chain === 'solana' ? 'SOL' : 'XLM';
+  // The live selected network — the warning box must name the real network
+  // the funds arrive on, not a hardcoded testnet.
+  const networkSummary = networkFor(account.chain, networks, selectedNetworks);
+  const networkName = networkLabel(account.chain, networks, selectedNetworks).toUpperCase();
+  const faucetAvailable = networkSummary?.faucet ?? false;
 
   const handleCopy = () => {
     void navigator.clipboard.writeText(account.address);
@@ -1278,112 +1654,186 @@ function ReceiveView({
     setTimeout(() => setCopied(false), 2000);
   };
 
-  /** Opens an external faucet page in a new browser tab when one is returned. */
-  const openExternalFaucet = (url: string) => {
-    // The popup/sidepanel cannot fetch cross-origin, but a plain tab open is
-    // allowed. The user completes any CAPTCHA/login there and funds arrive at
-    // the pre-filled address.
-    if (typeof chrome.tabs?.create === 'function') {
-      void chrome.tabs.create({ url });
-    } else {
-      window.open(url, '_blank', 'noopener,noreferrer');
+  const handleShare = async () => {
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: 'My Veilpay Address',
+          text: account.address,
+        });
+        return;
+      } catch {
+        // Fallback
+      }
     }
+    handleCopy();
+  };
+
+  const handleShareLink = () => {
+    const payUri = `${account.chain}:${account.address}${requestAmount ? `?amount=${requestAmount}` : ''}`;
+    void navigator.clipboard.writeText(payUri);
+    setLinkCopied(true);
+    setTimeout(() => setLinkCopied(false), 2000);
   };
 
   const handleFaucet = async () => {
     setFaucetState('loading');
     setFaucetError(null);
-    setFaucetTxHash(null);
-    setFaucetOpened(false);
     const result = await requestFaucet(account.chain, account.address);
     if (result.ok && result.faucetUrl !== undefined) {
-      // External faucet (EVM always; Solana when the automatic airdrop fails):
-      // open it so the user can complete the CAPTCHA / claim flow.
-      openExternalFaucet(result.faucetUrl);
+      if (typeof chrome.tabs?.create === 'function') {
+        void chrome.tabs.create({ url: result.faucetUrl });
+      } else {
+        window.open(result.faucetUrl, '_blank', 'noopener,noreferrer');
+      }
       setFaucetState('success');
-      setFaucetOpened(true);
     } else if (result.ok) {
-      // Fully automatic airdrop (Solana RPC success / Stellar Friendbot).
       setFaucetState('success');
-      setFaucetTxHash(result.txHash ?? null);
     } else {
       setFaucetState('error');
       setFaucetError(result.error ?? 'Could not request testnet funds.');
     }
   };
 
-  const faucetHint: Record<string, string> = {
-    evm: 'Sepolia faucets need a CAPTCHA — we open one in a new tab with your address pre-filled.',
-    solana: '0.1 SOL is airdropped automatically. If that fails, the web faucet opens in a new tab.',
-    stellar: 'Friendbot funds this testnet address (10,000 XLM).',
-  };
-
   return (
-    <main className="flex min-h-[600px] w-[400px] animate-fade-in flex-col gap-4 p-4">
-      <header className="flex items-baseline justify-between">
-        <h1 className="font-display text-lg font-bold text-content-primary">Veilpay</h1>
-        <span className="font-mono text-xs text-content-tertiary">v0.0.1</span>
+    <main className="flex min-h-[600px] w-[400px] flex-col bg-surface-900 text-content-primary animate-fade-in-up">
+      {/* Top Header matching Screenshot 5 */}
+      <header className="flex shrink-0 items-center justify-between border-b border-surface-800/80 px-4 py-3">
+        <button
+          type="button"
+          onClick={onBack}
+          aria-label="Back"
+          className="flex items-center gap-1.5 font-mono text-xs font-semibold text-content-secondary hover:text-white transition-colors"
+        >
+          <Glyph name="arrow-left" className="h-4 w-4" />
+          <span>BACK</span>
+        </button>
+
+        <h1 className="font-display text-sm font-bold tracking-widest text-white uppercase">
+          RECEIVE
+        </h1>
+
+        <div className="w-12" />
       </header>
 
-      <div className="flex flex-1 flex-col items-center justify-center gap-4">
-        <p className="font-body text-sm text-content-secondary">
-          Your <span className="font-mono">{account.chain}</span> address
-        </p>
-
-        <div className="flex items-center justify-center rounded-2xl bg-white p-3">
-          <QRCode value={account.address} size={220} />
+      {/* Main Content */}
+      <div className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-3">
+        {/* Network Banner matching Screenshot 5 */}
+        <div className="flex items-center justify-center gap-2 py-1">
+          <BrandLogo size="md" className="h-6 w-6" />
+          <span className="font-display text-sm font-bold tracking-wider text-accent-500 uppercase">
+            {networkName}
+          </span>
         </div>
 
-        <Card className="w-full">
-          <p className="font-mono text-xs text-content-primary break-all text-center">
-            {account.address}
+        {/* Big QR Code Card matching Screenshot 5 */}
+        <div className="flex items-center justify-center rounded-2xl border border-surface-700/80 bg-surface-800/80 p-5 shadow-raised">
+          <div className="rounded-xl bg-white p-3 shadow-md">
+            <QRCode value={account.address} size={200} />
+          </div>
+        </div>
+
+        {/* Warning Box matching Screenshot 5 */}
+        <div className="flex items-start gap-2.5 rounded-xl border border-accent-500/40 bg-accent-500/5 p-3">
+          <Glyph name="alert" className="h-4 w-4 text-accent-500 shrink-0 mt-0.5" />
+          <p className="font-mono text-[11px] leading-relaxed text-content-secondary">
+            Ensure you only send <span className="text-white font-semibold">{nativeSymbol}</span> to this address via the <span className="text-accent-400 font-semibold">{networkName}</span> network.
           </p>
-        </Card>
-        <Button fullWidth onClick={handleCopy}>
-          {copied ? (
-            <>
-              <Glyph name="check" className="h-4 w-4" /> Copied!
-            </>
-          ) : (
-            <>
-              <Glyph name="copy" className="h-4 w-4" /> Copy address
-            </>
-          )}
-        </Button>
-
-        <div className="w-full">
-          <Button fullWidth variant="secondary" onClick={handleFaucet} disabled={faucetState === 'loading'}>
-            {faucetState === 'loading' ? 'Requesting testnet funds…' : 'Get testnet funds'}
-          </Button>
-          <p className="mt-2 font-body text-xs text-content-tertiary text-center">{faucetHint[account.chain]}</p>
-
-          {faucetState === 'success' && faucetOpened && (
-            <div className="mt-2 rounded-xl border border-surface-600 bg-surface-700/60 p-3">
-              <p className="font-body text-xs font-medium text-content-primary text-center">
-                Faucet opened in a new tab.
-              </p>
-              <p className="mt-1 font-body text-xs text-content-secondary text-center">
-                Complete the CAPTCHA there with this address to receive testnet funds.
-              </p>
-            </div>
-          )}
-          {faucetState === 'success' && !faucetOpened && faucetTxHash !== null && (
-            <p className="mt-2 font-mono text-[10px] text-success break-all text-center">
-              Requested. Tx: {faucetTxHash.slice(0, 18)}…
-            </p>
-          )}
-          {faucetState === 'success' && !faucetOpened && faucetTxHash === null && (
-            <p className="mt-2 font-body text-xs text-success text-center">Funds requested.</p>
-          )}
-          {faucetState === 'error' && (
-            <p className="mt-2 font-body text-xs text-danger text-center">{faucetError}</p>
-          )}
         </div>
 
-        <Button variant="ghost" fullWidth onClick={onBack}>
-          <Glyph name="arrow-left" className="h-4 w-4" /> Back
-        </Button>
+        {/* YOUR ADDRESS Card matching Screenshot 5 */}
+        <div>
+          <span className="block font-mono text-[10px] font-semibold tracking-wider text-content-tertiary uppercase mb-1.5">
+            YOUR ADDRESS
+          </span>
+          <div className="rounded-xl border border-surface-700 bg-surface-800/90 p-3 font-mono text-xs text-content-primary break-all text-center select-all">
+            {account.address}
+          </div>
+
+          <div className="mt-2 flex gap-2">
+            <button
+              type="button"
+              onClick={handleCopy}
+              className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-surface-700 bg-surface-800/80 py-2.5 font-mono text-xs font-bold text-accent-500 transition-colors hover:bg-surface-700 active:scale-95"
+            >
+              <Glyph name={copied ? 'check' : 'copy'} className="h-4 w-4" />
+              <span>{copied ? 'COPIED' : 'COPY'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleShare}
+              className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-surface-700 bg-surface-800/80 py-2.5 font-mono text-xs font-bold text-accent-500 transition-colors hover:bg-surface-700 active:scale-95"
+            >
+              <Glyph name="share" className="h-4 w-4" />
+              <span>SHARE</span>
+            </button>
+          </div>
+        </div>
+
+        {/* REQUEST SPECIFIC AMOUNT matching Screenshot 5 */}
+        <div>
+          <label
+            htmlFor="receive-amount"
+            className="block font-mono text-[10px] font-semibold tracking-wider text-content-tertiary uppercase mb-1.5"
+          >
+            REQUEST SPECIFIC AMOUNT
+          </label>
+          <div className="flex items-center justify-between rounded-xl border border-surface-700 bg-surface-800/90 px-3 py-2">
+            <input
+              id="receive-amount"
+              type="text"
+              inputMode="decimal"
+              placeholder="0.00"
+              value={requestAmount}
+              onChange={(e) => setRequestAmount(e.target.value)}
+              className="w-full bg-transparent font-mono text-sm text-content-primary placeholder:text-content-tertiary outline-none"
+            />
+            <span className="font-mono text-xs font-bold text-accent-500 ml-2">
+              {nativeSymbol}
+            </span>
+          </div>
+        </div>
+
+        {/* SHARE RECEIVE LINK button matching Screenshot 5 */}
+        <button
+          type="button"
+          onClick={handleShareLink}
+          className="w-full rounded-xl border border-surface-600 bg-surface-800 py-3 font-mono text-xs font-bold tracking-wider text-white transition-colors hover:bg-surface-700 active:scale-98 uppercase"
+        >
+          {linkCopied ? 'LINK COPIED TO CLIPBOARD' : 'SHARE RECEIVE LINK'}
+        </button>
+
+        {/* Get testnet funds / faucet option — only networks that have one */}
+        {faucetAvailable && (
+          <div className="mt-1">
+            <Button
+              fullWidth
+              variant="secondary"
+              onClick={handleFaucet}
+              disabled={faucetState === 'loading'}
+            >
+              {faucetState === 'loading' ? 'Requesting testnet funds…' : 'Get testnet funds'}
+            </Button>
+            {faucetState === 'success' && (
+              <p className="mt-1.5 font-mono text-[11px] text-success text-center">
+                Funds requested successfully!
+              </p>
+            )}
+            {faucetState === 'error' && (
+              <p className="mt-1.5 font-mono text-[11px] text-danger text-center">{faucetError}</p>
+            )}
+          </div>
+        )}
+        {!faucetAvailable && (
+          <p className="mt-1 font-mono text-[11px] leading-relaxed text-content-tertiary text-center">
+            This is a live network — send real {nativeSymbol} to this address.
+          </p>
+        )}
       </div>
+
+      {/* Tactical Bottom Navigation Bar */}
+      <TacticalBottomNav activeTab="receive" onSelectTab={onTabSelect ?? (() => {})} />
     </main>
   );
 }
@@ -1413,7 +1863,7 @@ function ImportWallet({
   onBack: () => void;
 }) {
   return (
-    <main className="flex min-h-[600px] w-[400px] flex-col gap-4 p-4">
+    <main className="flex min-h-[600px] w-[400px] flex-col gap-4 p-4 animate-fade-in-up">
       <header className="flex items-baseline justify-between">
         <h1 className="font-display text-lg font-bold text-content-primary">Veilpay</h1>
         <span className="font-mono text-xs text-content-tertiary">v0.0.1</span>

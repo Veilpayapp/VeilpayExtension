@@ -2,9 +2,9 @@
  * Stellar payment operation — build, sign, and serialize without
  * @stellar/stellar-sdk.
  *
- * Uses raw XDR encoding for a native (XLM) payment with MEMO_NONE and no
- * time bounds. The caller provides the account sequence number from Horizon
- * and the raw private key from the vault.
+ * Uses raw XDR encoding for a native (XLM) or issued-asset payment, with an
+ * optional MEMO_TEXT (≤ 28 bytes) and no time bounds. The caller provides the
+ * account sequence number from Horizon and the raw private key from the vault.
  */
 
 import { base32 } from '@scure/base';
@@ -73,6 +73,12 @@ export interface UnsignedStellarPayment {
   sequence: bigint;
   /** Base fee in stroops (typically 100). */
   fee: number;
+  /**
+   * Optional MEMO_TEXT, UTF-8 encoded. Stellar caps memos at 28 bytes;
+   * longer input is rejected (never silently truncated, since memos are
+   * load-bearing for exchanges and custodial services).
+   */
+  memo?: string | undefined;
   /** Network passphrase. Defaults to the Stellar testnet passphrase. */
   networkPassphrase?: string;
 }
@@ -148,6 +154,43 @@ function xdrInt64(value: bigint): Uint8Array {
 /** Encode an opaque<max> = uint32 length + bytes. */
 function xdrOpaque(bytes: Uint8Array): Uint8Array {
   return concat([xdrUint32(bytes.length), bytes]);
+}
+
+/**
+ * Encodes an XDR `string<max>`: uint32 byte length + bytes, zero-padded to a
+ * 4-byte boundary (XDR alignment). `xdrOpaque` alone is fine for fields whose
+ * length is already a multiple of 4 (e.g. 64-byte signatures); variable-length
+ * text must be padded or every following field shifts and the envelope fails
+ * to decode.
+ */
+function xdrString(bytes: Uint8Array): Uint8Array {
+  const padding = (4 - (bytes.length % 4)) % 4;
+  return concat([xdrUint32(bytes.length), bytes, new Uint8Array(padding)]);
+}
+
+/**
+ * Encodes the Memo union.
+ *
+ *   union switch (MemoType type) {
+ *     case MEMO_NONE: void;          // 0
+ *     case MEMO_TEXT: string<28>;    // 1
+ *     ...
+ *   }
+ *
+ * Empty/whitespace-only input collapses to MEMO_NONE so a blank memo field
+ * never changes the transaction. Input over 28 UTF-8 bytes throws: memos are
+ * load-bearing for exchanges, so truncating silently is worse than failing.
+ */
+function xdrMemo(memo: string | undefined): Uint8Array {
+  const text = memo?.trim() ?? '';
+  if (text.length === 0) return xdrUint32(0); // MEMO_NONE
+  const bytes = new TextEncoder().encode(text);
+  if (bytes.length > 28) {
+    throw new Error(
+      `Stellar memo is ${bytes.length} bytes; the on-chain maximum is 28.`,
+    );
+  }
+  return concat([xdrUint32(1), xdrString(bytes)]); // MEMO_TEXT
 }
 
 /** Encode a variable-length array = uint32 count + elements. */
@@ -268,6 +311,7 @@ function xdrTransaction(
   destPubkey: Uint8Array,
   amount: bigint,
   asset: StellarAssetXdr,
+  memo: string | undefined,
 ): Uint8Array {
   // sourceAccount: AccountID = PUBLIC_KEY_TYPE_ED25519 + 32 bytes
   const sourceAccount = xdrPublicKey(sourcePubkey);
@@ -277,8 +321,8 @@ function xdrTransaction(
   const seqNumXdr = xdrUint64(seqNum);
   // preconditions: modern `Preconditions` union, PRECOND_NONE (no constraints).
   const preconditions = xdrPreconditionsNone();
-  // memo: MEMO_NONE = 0
-  const memo = xdrUint32(0);
+  // memo: MEMO_NONE or MEMO_TEXT
+  const memoXdr = xdrMemo(memo);
   // operations: Operation[] = [payment operation]
   const operations = xdrArray([xdrPaymentOperation(destPubkey, amount, asset)]);
   // ext: v=0
@@ -289,7 +333,7 @@ function xdrTransaction(
     feeXdr,
     seqNumXdr,
     preconditions,
-    memo,
+    memoXdr,
     operations,
     ext,
   ]);
@@ -337,6 +381,7 @@ export function signStellarPayment(
     destPubkey,
     tx.amount,
     asset,
+    tx.memo,
   );
 
   // The network transaction hash is the SHA-256 of the Stellar signature

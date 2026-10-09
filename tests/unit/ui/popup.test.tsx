@@ -40,6 +40,7 @@ const INITIAL_STORE = {
   unlockedUntil: null,
   accounts: [],
   accountIndex: 0,
+  selectedAccountIdx: 0,
   balances: {},
   zkCapability: null,
   pendingApproval: null,
@@ -249,6 +250,62 @@ describe('popup unlocked dashboard', () => {
     expect(screen.getAllByRole('button', { name: 'Receive' }).length).toBe(4);
   });
 
+  /** Registry summaries the network selector renders. */
+  const NETWORK_SUMMARIES = [
+    {
+      id: 'stellar:mainnet',
+      chain: 'stellar' as const,
+      kind: 'mainnet' as const,
+      name: 'Stellar Mainnet',
+      symbol: 'XLM',
+      rpcUrls: ['https://horizon.stellar.org'],
+      explorerTx: 'https://stellar.expert/explorer/public/tx/{hash}',
+      faucet: false,
+    },
+    {
+      id: 'stellar:testnet',
+      chain: 'stellar' as const,
+      kind: 'testnet' as const,
+      name: 'Stellar Testnet',
+      symbol: 'XLM',
+      rpcUrls: ['https://horizon-testnet.stellar.org'],
+      explorerTx: 'https://stellar.expert/explorer/testnet/tx/{hash}',
+      faucet: true,
+    },
+    {
+      id: 'evm:ethereum',
+      chain: 'evm' as const,
+      kind: 'mainnet' as const,
+      name: 'Ethereum',
+      symbol: 'ETH',
+      rpcUrls: ['https://1rpc.io/eth'],
+      chainId: 1,
+      explorerTx: 'https://etherscan.io/tx/{hash}',
+      faucet: false,
+    },
+    {
+      id: 'evm:sepolia',
+      chain: 'evm' as const,
+      kind: 'testnet' as const,
+      name: 'Sepolia',
+      symbol: 'ETH',
+      rpcUrls: ['https://ethereum-sepolia-rpc.publicnode.com'],
+      chainId: 11155111,
+      explorerTx: 'https://sepolia.etherscan.io/tx/{hash}',
+      faucet: true,
+    },
+    {
+      id: 'solana:devnet',
+      chain: 'solana' as const,
+      kind: 'testnet' as const,
+      name: 'Solana Devnet',
+      symbol: 'SOL',
+      rpcUrls: ['https://api.devnet.solana.com'],
+      explorerTx: 'https://explorer.solana.com/tx/{hash}?cluster=devnet',
+      faucet: true,
+    },
+  ];
+
   it('opens the send form for an account', async () => {
     const user = userEvent.setup();
     useWallet.setState({ vaultState: 'unlocked', accounts: [ACCOUNTS[0]!] });
@@ -362,5 +419,239 @@ describe('popup unlocked dashboard', () => {
     await user.click(screen.getByRole('button', { name: 'Export private key' }));
 
     expect(await screen.findByText('0xdeadbeef')).toBeInTheDocument();
+  });
+
+  it('sends a Stellar transfer with the memo attached to the wire payload', async () => {
+    const user = userEvent.setup();
+    const stellar = ACCOUNTS[2]!;
+    const sent: Array<{ kind: string; payload: Record<string, unknown> }> = [];
+
+    const responder = buildResponder({
+      'vault.status': { state: 'unlocked', unlockedUntil: Date.now() + 60_000 },
+      'zk.capability': null,
+      'account.balance': { chain: 'stellar', address: stellar.address, balance: '100000000' },
+      'tx.estimate': {
+        chain: 'stellar',
+        from: stellar.address,
+        feeNative: '100',
+        gasLimit: '1',
+        decimals: 7,
+        spendableBalance: '100000000',
+        symbol: 'XLM',
+      },
+      'tx.transfer': {
+        chain: 'stellar',
+        from: stellar.address,
+        to: 'recipient',
+        amountNative: '15000000',
+        hash: 'abc123',
+        decimals: 7,
+      },
+    });
+    // Wrap the responder to capture outgoing tx.transfer payloads.
+    vi.mocked(chrome.runtime.sendMessage).mockImplementation((...args: unknown[]) => {
+      const message = (args.length >= 2 ? args[1] : args[0]) as Incoming;
+      if (message.kind === 'tx.transfer') {
+        sent.push(message as { kind: string; payload: Record<string, unknown> });
+      }
+      return responder(message) as never;
+    });
+
+    useWallet.setState({ vaultState: 'unlocked', accounts: [stellar] });
+    render(<App />);
+
+    const [sendButton] = await screen.findAllByRole('button', { name: 'Send' });
+    if (!sendButton) throw new Error('Expected a Send button.');
+    await user.click(sendButton);
+
+    await user.type(screen.getByPlaceholderText('Recipient address'), stellar.address);
+    await user.type(screen.getByLabelText('Amount (XLM)'), '1.5');
+    await user.type(screen.getByLabelText('Memo'), 'order-42');
+
+    // Wait for the debounced estimate so the CTA reflects the real gate.
+    await screen.findByText(/Estimated fee: 100 stroops/);
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(await screen.findByText(/Sent!/)).toBeInTheDocument();
+
+    // The memo the user typed must actually be on the wire — not collected
+    // and dropped.
+    const transfer = sent.at(-1);
+    expect(transfer).toBeDefined();
+    expect(transfer?.payload).toMatchObject({
+      chain: 'stellar',
+      amount: '1.5',
+      memo: 'order-42',
+    });
+  });
+
+  it('renders the real balance — never the screenshot placeholder figures', async () => {
+    useWallet.setState({ vaultState: 'unlocked', accounts: [ACCOUNTS[2]!] });
+    installResponder({
+      'vault.status': { state: 'unlocked', unlockedUntil: Date.now() + 60_000 },
+      'zk.capability': null,
+      'account.balance': { chain: 'stellar', address: ACCOUNTS[2]!.address, balance: '0' },
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText('Portfolio')).toBeInTheDocument();
+
+    // The fabricated screenshot figures must never appear, even at zero balance.
+    expect(screen.queryByText(/9469/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/1,893/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Live price/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/-6\.41%/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\.\.\. pXLM/)).not.toBeInTheDocument();
+
+    // A zero balance renders as a real zero.
+    expect(await screen.findByText('0')).toBeInTheDocument();
+  });
+
+  it('labels incoming activity as RECEIVED with a positive amount', async () => {    const stellar = ACCOUNTS[2]!;
+    const incoming = {
+      hash: 'tx-in-1',
+      chain: 'stellar',
+      block: 1,
+      timestamp: '2026-08-12T00:00:00Z',
+      from: 'GDIFFERENTFROMADDRESS1111111111111111111111111111111111',
+      to: stellar.address,
+      amount: '15000000', // 1.5 XLM
+      fee: '',
+      status: 'confirmed',
+    };
+
+    vi.mocked(chrome.runtime.sendMessage).mockImplementation((...args: unknown[]) => {
+      const message = (args.length >= 2 ? args[1] : args[0]) as Incoming;
+      if (message.kind === 'vault.status') {
+        return Promise.resolve({
+          id: uuid(),
+          ok: true,
+          data: { state: 'unlocked', unlockedUntil: Date.now() + 60_000 },
+        }) as never;
+      }
+      if (message.kind === 'zk.capability') {
+        return Promise.resolve({ id: uuid(), ok: true, data: null }) as never;
+      }
+      if (message.kind === 'indexer.history') {
+        return Promise.resolve({
+          id: uuid(),
+          ok: true,
+          data: { transactions: [incoming], nextCursor: null, source: 'remote' },
+        }) as never;
+      }
+      return Promise.resolve({ id: uuid(), ok: true, data: undefined }) as never;
+    });
+
+    useWallet.setState({ vaultState: 'unlocked', accounts: [stellar] });
+    render(<App />);
+
+    // Incoming payments render as credits, not debits.
+    expect(await screen.findByText(/RECEIVED · STELLAR/)).toBeInTheDocument();
+    expect(screen.getByText('+ 1.5 XLM')).toBeInTheDocument();
+    expect(screen.queryByText(/SENT · STELLAR/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the selected network when navigating away and back', async () => {
+    const user = userEvent.setup();
+    useWallet.setState({
+      vaultState: 'unlocked',
+      accounts: ACCOUNTS,
+      networks: NETWORK_SUMMARIES,
+      selectedNetworks: {
+        stellar: 'stellar:testnet',
+        evm: 'evm:sepolia',
+        solana: 'solana:devnet',
+      },
+    });
+    installResponder({
+      'vault.status': { state: 'unlocked', unlockedUntil: Date.now() + 60_000 },
+      'zk.capability': null,
+      'networks.list': NETWORK_SUMMARIES,
+      'networks.selected': {
+        stellar: 'stellar:testnet',
+        evm: 'evm:sepolia',
+        solana: 'solana:devnet',
+      },
+      'networks.select': { ok: true },
+      'account.balance': { chain: 'stellar', address: 'STELLAR-ADDR', balance: '10000000' },
+    });
+
+    render(<App />);
+
+    // The dashboard defaults to the first account (EVM) on Sepolia.
+    expect(await screen.findByText('Portfolio')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Select network, current SEPOLIA/ })).toBeInTheDocument();
+
+    // Shift the network to Stellar via the selector: the menu lists every
+    // registry network; clicking one both persists the selection (store +
+    // background) and moves the dashboard to that chain.
+    await user.click(screen.getByRole('button', { name: /Select network, current SEPOLIA/ }));
+    await user.click(screen.getByRole('menuitemradio', { name: /Stellar Testnet/ }));
+
+    // The banner now shows the Stellar network.
+    expect(
+      await screen.findByRole('button', { name: /Select network, current STELLAR TESTNET/ }),
+    ).toBeInTheDocument();
+
+    // Navigate to the send form and back — the selection must survive the
+    // remount instead of snapping back to EVM.
+    const [sendButton] = screen.getAllByRole('button', { name: 'Send' });
+    if (!sendButton) throw new Error('Expected a Send button.');
+    await user.click(sendButton);
+    expect(await screen.findByText(/Send from/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Back' }));
+
+    expect(await screen.findByText('Portfolio')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /Select network, current STELLAR TESTNET/ }),
+    ).toBeInTheDocument();
+  });
+
+  it('switches to a mainnet network through the selector and warns', async () => {
+    const user = userEvent.setup();
+    useWallet.setState({
+      vaultState: 'unlocked',
+      accounts: ACCOUNTS,
+      networks: NETWORK_SUMMARIES,
+      selectedNetworks: {
+        stellar: 'stellar:testnet',
+        evm: 'evm:sepolia',
+        solana: 'solana:devnet',
+      },
+    });
+    installResponder({
+      'vault.status': { state: 'unlocked', unlockedUntil: Date.now() + 60_000 },
+      'zk.capability': null,
+      'networks.list': NETWORK_SUMMARIES,
+      'networks.selected': {
+        stellar: 'stellar:testnet',
+        evm: 'evm:sepolia',
+        solana: 'solana:devnet',
+      },
+      'networks.select': { ok: true },
+      'account.balance': { chain: 'stellar', address: 'STELLAR-ADDR', balance: '10000000' },
+    });
+
+    render(<App />);
+    expect(await screen.findByText('Portfolio')).toBeInTheDocument();
+
+    // Move to the Stellar chain first (dashboard defaults to the EVM card),
+    // then switch Stellar from testnet to MAINNET: the banner flips from the
+    // testnet warning to the real-funds warning.
+    await user.click(screen.getByRole('button', { name: /Select network, current SEPOLIA/ }));
+    await user.click(screen.getByRole('menuitemradio', { name: /Stellar Testnet/ }));
+    expect(
+      await screen.findByRole('button', { name: /Select network, current STELLAR TESTNET/ }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /Select network, current STELLAR TESTNET/ }));
+    await user.click(screen.getByRole('menuitemradio', { name: /Stellar Mainnet/ }));
+
+    expect(
+      await screen.findByRole('button', { name: /Select network, current STELLAR MAINNET/ }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText(/REAL funds move on this network/)).toBeInTheDocument();
   });
 });
