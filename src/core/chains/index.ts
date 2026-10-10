@@ -84,6 +84,18 @@ export interface ChainService {
 
   /** Stellar: raw (stroop) balance of an issued asset. */
   getAssetBalance?(address: string, code: string, issuer: string): Promise<bigint>;
+  /** Stellar: the account's manage_data entries (base64 values decoded). */
+  getAccountDataEntries?(address: string): Promise<Record<string, Uint8Array>>;
+  /** Stellar: recent MEMO_HASH transactions — the stealth scan surface. */
+  listRecentHashMemoTransactions?(
+    limit?: number,
+    /** Pages to walk (200 records each) — widens the scan window on busy networks. */
+    pages?: number,
+  ): Promise<Array<{ txHash: string; memoBytes: Uint8Array; createdAt: string }>>;
+  /** Stellar: one transaction's 32-byte hash memo, by transaction hash. */
+  getTransactionMemo?(txHash: string): Promise<Uint8Array | null>;
+  /** Stellar: the network's live base reserve in stroops. */
+  getBaseReserve?(): Promise<bigint>;
 }
 
 /**
@@ -585,7 +597,7 @@ class StellarService implements ChainService {
    * "fresh empty account" case, not an error.
    */
   private async fetchAccount(address: string): Promise<
-    { balances: unknown[]; sequence: string } | 'notFunded'
+    { balances: unknown[]; sequence: string; data?: Record<string, unknown> } | 'notFunded'
   > {
     const result = await this.horizonFetch(`/accounts/${address}`);
 
@@ -605,7 +617,7 @@ class StellarService implements ChainService {
     if (typeof data !== 'object' || data === null) {
       throw new Error(`Horizon account returned unexpected shape: ${JSON.stringify(data)}`);
     }
-    const record = data as { balances?: unknown; sequence?: unknown };
+    const record = data as { balances?: unknown; sequence?: unknown; data?: unknown };
     if (record.balances !== undefined && !Array.isArray(record.balances)) {
       throw new Error(`Horizon account returned unexpected shape: ${JSON.stringify(data)}`);
     }
@@ -615,7 +627,159 @@ class StellarService implements ChainService {
     return {
       balances: (record.balances as unknown[]) ?? [],
       sequence: (record.sequence as string) ?? '0',
+      ...(typeof record.data === 'object' && record.data !== null
+        ? { data: record.data as Record<string, unknown> }
+        : {}),
     };
+  }
+
+  /**
+   * The account's `manage_data` entries, with Horizon's base64 values decoded
+   * to raw bytes. Used by the privacy layer to read a recipient's published
+   * stealth meta-address.
+   */
+  async getAccountDataEntries(address: string): Promise<Record<string, Uint8Array>> {
+    const account = await this.fetchAccount(address);
+    if (account === 'notFunded' || account.data === undefined) return {};
+    const out: Record<string, Uint8Array> = {};
+    for (const [key, entry] of Object.entries(account.data)) {
+      if (typeof entry !== 'object' || entry === null) continue;
+      const value = (entry as { value?: unknown }).value;
+      if (typeof value !== 'string') continue;
+      try {
+        out[key] = decodeBase64AccountData(value);
+      } catch {
+        // A malformed entry is skipped, never fatal to the whole read.
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Recent transactions carrying a MEMO_HASH, newest first — the stealth
+   * receiver's scan surface. Each result pairs the transaction hash with the
+   * decoded 32-byte memo (the payer's ephemeral public key announcement).
+   *
+   * Pages through up to `pages` Horizon pages (200 records each) using the
+   * cursor API: on a busy network a single page passes in seconds, and a
+   * one-page window would make private payments effectively unscannable.
+   * Pagination stops early on an empty page or a hard read failure — a
+   * best-effort window beats a failed scan.
+   */
+  async listRecentHashMemoTransactions(
+    limit = 200,
+    pages = 5,
+  ): Promise<Array<{ txHash: string; memoBytes: Uint8Array; createdAt: string }>> {
+    const pageSize = Math.min(Math.max(limit, 1), 200);
+    const maxPages = Math.max(1, Math.min(pages, 25));
+    const out: Array<{ txHash: string; memoBytes: Uint8Array; createdAt: string }> = [];
+    let cursor = '';
+
+    for (let page = 0; page < maxPages; page += 1) {
+      const query =
+        `order=desc&limit=${pageSize}&include_failed=false` +
+        (cursor.length > 0 ? `&cursor=${encodeURIComponent(cursor)}` : '');
+      const result = await this.horizonFetch(`/transactions?${query}`);
+      if (result === 'notFound') break;
+      const response = result;
+      if (!response.ok) {
+        // The first page failing is a real error; later pages failing just
+        // narrows the window (best-effort pagination).
+        if (page === 0) {
+          throw new Error(`Horizon /transactions failed: HTTP ${response.status}`);
+        }
+        break;
+      }
+      const body = (await response.json()) as unknown;
+      const records =
+        typeof body === 'object' && body !== null && Array.isArray((body as { _embedded?: { records?: unknown } })._embedded?.records)
+          ? ((body as { _embedded: { records: unknown[] } })._embedded.records)
+          : [];
+      if (records.length === 0) break;
+      let sawValid = false;
+      for (const record of records) {
+        if (typeof record !== 'object' || record === null) continue;
+        const r = record as {
+          hash?: unknown;
+          memo?: unknown;
+          memo_type?: unknown;
+          created_at?: unknown;
+          paging_token?: unknown;
+        };
+        // The cursor walks strictly backwards by paging token.
+        if (typeof r.paging_token === 'string' && r.paging_token.length > 0) {
+          cursor = r.paging_token;
+          sawValid = true;
+        }
+        if (r.memo_type !== 'hash' || typeof r.memo !== 'string' || typeof r.hash !== 'string') {
+          continue;
+        }
+        try {
+          out.push({
+            txHash: r.hash,
+            memoBytes: decodeBase64AccountData(r.memo),
+            createdAt: typeof r.created_at === 'string' ? r.created_at : '',
+          });
+        } catch {
+          // Undecodable memo — skip, never fail the whole scan.
+        }
+      }
+      if (!sawValid) break; // malformed page: no point paginating further
+    }
+    return out;
+  }
+
+  /**
+   * One transaction's memo, by hash — used by the claim path to re-derive
+   * the one-time key from the announcement before sweeping the funds.
+   */
+  async getTransactionMemo(txHash: string): Promise<Uint8Array | null> {
+    const result = await this.horizonFetch(`/transactions/${txHash}`);
+    if (result === 'notFound') return null;
+    const response = result;
+    if (!response.ok) {
+      throw new Error(`Horizon /transactions/${txHash} failed: HTTP ${response.status}`);
+    }
+    const body = (await response.json()) as unknown;
+    if (typeof body !== 'object' || body === null) return null;
+    const record = body as { memo?: unknown; memo_type?: unknown };
+    if (record.memo_type !== 'hash' || typeof record.memo !== 'string') return null;
+    try {
+      return decodeBase64AccountData(record.memo);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The network's current base reserve in stroops, read from the latest
+   * ledger header (0.5 XLM on today's networks; a CREATE_ACCOUNT starting
+   * balance must at least cover it). Falls back to the historical constant
+   * when the ledger read is unavailable.
+   */
+  async getBaseReserve(): Promise<bigint> {
+    try {
+      const result = await this.horizonFetch('/ledgers?order=desc&limit=1');
+      if (result === 'notFound') return 5_000_000n;
+      const response = result;
+      if (!response.ok) return 5_000_000n;
+      const body = (await response.json()) as unknown;
+      const records =
+        typeof body === 'object' &&
+        body !== null &&
+        Array.isArray((body as { _embedded?: { records?: unknown } })._embedded?.records)
+          ? ((body as { _embedded: { records: unknown[] } })._embedded.records)
+          : [];
+      const first = records[0];
+      if (typeof first === 'object' && first !== null) {
+        const raw = (first as { base_reserve_in_stroops?: unknown }).base_reserve_in_stroops;
+        if (typeof raw === 'string' && /^\d+$/.test(raw)) return BigInt(raw);
+        if (typeof raw === 'number') return BigInt(Math.floor(raw));
+      }
+    } catch {
+      // Fall through to the constant.
+    }
+    return 5_000_000n;
   }
 
   async getBalance(address: string): Promise<bigint> {

@@ -42,7 +42,27 @@ import {
   type UnsignedSolanaTransfer,
 } from '@/core/chains/solana/transaction';
 import { erc20TransferCalldata } from '@/core/chains/evm/erc20';
-import { signStellarPayment, signStellarChangeTrust, STELLAR_TRUSTLINE_NO_LIMIT, type UnsignedStellarPayment } from '@/core/chains/stellar/transaction';
+import {
+  signStellarAccountMergeWithScalar,
+  signStellarChangeTrust,
+  signStellarCreateAccount,
+  signStellarManageData,
+  signStellarPayment,
+  STELLAR_TRUSTLINE_NO_LIMIT,
+  type UnsignedStellarPayment,
+} from '@/core/chains/stellar/transaction';
+import {
+  addressForPrivateKey,
+  decodeMetaValue,
+  deriveStealthKeys,
+  deriveStealthPayment,
+  encodeMetaValue,
+  recoverStealthPrivateKey,
+  stealthMetaFromKeys,
+  STEALTH_DATA_KEY,
+  type StealthMeta,
+} from '@/core/privacy/stellar-stealth';
+import type { ChainService } from '@/core/chains';
 import {
   addCustomToken,
   listCustomTokens,
@@ -1907,6 +1927,238 @@ const handlers: HandlerMap = {
     );
     return results;
   },
+
+  // ── Stellar privacy payments (pXLM stealth) ───────────────────────────
+  //
+  // meta is a public read (like an address); publish/scan/claim are
+  // router-enforced privileged kinds — they derive stealth keys from the
+  // vault and/or broadcast, which a page must never trigger.
+
+  /**
+   * Resolves a recipient's published stealth meta-address so the UI can offer
+   * (or grey out) private payments before the user types an amount.
+   */
+  'stellar.stealth.meta': async (payload) => {
+    const service = createChainService('stellar', await resolveStellarEndpoints());
+    const meta = await fetchStealthMeta(service, payload.address);
+    if (meta === null) return null;
+    return { spendPub: bytesToHex(meta.spendPub), viewPub: bytesToHex(meta.viewPub) };
+  },
+
+  /**
+   * Publishes THIS wallet's stealth meta-address onto its Stellar account
+   * (manage_data `vpstealth`) so other Veilpay users can pay it privately.
+   * Idempotent: re-publishing an identical value is a no-op that does not
+   * burn a fee.
+   */
+  'stellar.stealth.publish': async () => {
+    if ((await vault.getState()) !== 'unlocked') {
+      throw new ProtocolError('VAULT_LOCKED', 'Unlock the wallet to publish a privacy meta-address.');
+    }
+    const metaValue = await vault.withMnemonic(async (mnemonic) => {
+      const keys = deriveStealthKeys(mnemonic);
+      try {
+        return encodeMetaValue(stealthMetaFromKeys(keys));
+      } finally {
+        keys.spendPriv.fill(0);
+        keys.viewPriv.fill(0);
+      }
+    });
+
+    const endpoints = await resolveStellarEndpoints();
+    const passphrase = await resolveStellarPassphrase();
+    const { txHash, alreadyPublished } = await vault.withAccount(
+      'stellar',
+      0,
+      async (account) => {
+        const service = createChainService('stellar', endpoints);
+        if (
+          typeof service.isFunded === 'function' &&
+          !(await service.isFunded(account.address))
+        ) {
+          const stellarNetwork = await getSelectedNetwork('stellar');
+          throw new ProtocolError(
+            'BAD_REQUEST',
+            stellarNetwork.faucet
+              ? `Fund the account on ${stellarNetwork.name} before publishing a privacy meta-address.`
+              : `Fund the account on ${stellarNetwork.name} before publishing a privacy meta-address.`
+          );
+        }
+        // Idempotency: an identical published value is skipped rather than
+        // spending a second fee for the same on-chain state.
+        const current = await fetchStealthMeta(service, account.address);
+        if (current !== null) {
+          try {
+            if (bytesToHex(encodeMetaValue(current)) === bytesToHex(metaValue)) {
+              return { txHash: '', alreadyPublished: true };
+            }
+          } catch {
+            // Malformed current entry — republish to overwrite it.
+          }
+        }
+        const sequence = await service.getSequence(account.address);
+        const fee = Number((await service.getBaseFee?.()) ?? 100n);
+        const signed = signStellarManageData(
+          {
+            from: account.address,
+            name: STEALTH_DATA_KEY,
+            value: metaValue,
+            sequence,
+            fee,
+            networkPassphrase: passphrase,
+          },
+          account.privateKey,
+        );
+        if (signed.from !== account.address) {
+          throw new Error('Signer address does not match the derived account.');
+        }
+        return { txHash: await service.sendTransaction(signed.raw), alreadyPublished: false };
+      },
+    );
+    void appendAudit('stellar.stealth.published', { txHash, alreadyPublished });
+    return { txHash, alreadyPublished };
+  },
+
+  /**
+   * Scans the selected network's recent MEMO_HASH transactions and reports
+   * the stealth payments this wallet can recover (the Monero-style view-key
+   * scan). Announcements that decode to a funded one-time account show as
+   * claimable; swept or unrelated memos are filtered out.
+   */
+  'stellar.stealth.scan': async () => {
+    if ((await vault.getState()) !== 'unlocked') {
+      throw new ProtocolError('VAULT_LOCKED', 'Unlock the wallet to scan for private payments.');
+    }
+    const service = createChainService('stellar', await resolveStellarEndpoints());
+    if (typeof service.listRecentHashMemoTransactions !== 'function') {
+      throw new ProtocolError('BAD_REQUEST', 'Stellar memo scanning is unavailable.');
+    }
+    const announcements = await service.listRecentHashMemoTransactions(200);
+
+    // Key derivation happens inside the mnemonic scope and the private keys
+    // never leave it; only the derived (public) one-time addresses do.
+    const candidates = await vault.withMnemonic(async (mnemonic) => {
+      const keys = deriveStealthKeys(mnemonic);
+      try {
+        const found: Array<{ txHash: string; oneTimeAddress: string; createdAt: string }> = [];
+        for (const announcement of announcements) {
+          // The announcement is exactly 32 bytes (a point); anything else is
+          // an unrelated hash memo and fromHex() rejects non-canonical input.
+          if (announcement.memoBytes.length !== 32) continue;
+          try {
+            const oneTimePriv = recoverStealthPrivateKey(
+              announcement.memoBytes,
+              keys.viewPriv,
+              keys.spendPriv,
+            );
+            try {
+              found.push({
+                txHash: announcement.txHash,
+                oneTimeAddress: addressForPrivateKey(oneTimePriv),
+                createdAt: announcement.createdAt,
+              });
+            } finally {
+              oneTimePriv.fill(0);
+            }
+          } catch {
+            // Not a Veilpay announcement (invalid point / wrong curve data).
+          }
+        }
+        return found;
+      } finally {
+        keys.spendPriv.fill(0);
+        keys.viewPriv.fill(0);
+      }
+    });
+
+    // Balance checks run OUTSIDE the mnemonic scope: the keys are already
+    // gone, and an unfunded one-time address means "already swept or
+    // unrelated memo" — those never surface as claimable.
+    const claimable: Array<{
+      txHash: string;
+      oneTimeAddress: string;
+      amountStroops: string;
+      createdAt: string;
+    }> = [];
+    for (const candidate of candidates) {
+      try {
+        if (typeof service.isFunded === 'function' && !(await service.isFunded(candidate.oneTimeAddress))) {
+          continue;
+        }
+        const balance = await service.getBalance(candidate.oneTimeAddress);
+        claimable.push({ ...candidate, amountStroops: balance.toString() });
+      } catch {
+        // A single read failure must not kill the whole scan.
+      }
+    }
+    return claimable;
+  },
+
+  /**
+   * Sweeps a found one-time account into the wallet's ordinary Stellar
+   * account with an ACCOUNT_MERGE (the whole balance, including the reserve,
+   * moves; no dust address survives). The one-time private key is derived,
+   * used, and zeroized inside the mnemonic scope.
+   */
+  'stellar.stealth.claim': async (payload) => {
+    if ((await vault.getState()) !== 'unlocked') {
+      throw new ProtocolError('VAULT_LOCKED', 'Unlock the wallet to claim private payments.');
+    }
+    const service = createChainService('stellar', await resolveStellarEndpoints());
+    if (typeof service.getTransactionMemo !== 'function') {
+      throw new ProtocolError('BAD_REQUEST', 'Stellar memo reads are unavailable.');
+    }
+    const memo = await service.getTransactionMemo(payload.txHash);
+    if (memo === null || memo.length !== 32) {
+      throw new ProtocolError(
+        'BAD_REQUEST',
+        'That transaction has no 32-byte hash memo — it is not a Veilpay stealth payment.'
+      );
+    }
+
+    const destination = (await vault.getAccountAddress('stellar', 0)).address;
+    const passphrase = await resolveStellarPassphrase();
+    const txHash = await vault.withMnemonic(async (mnemonic) => {
+      const keys = deriveStealthKeys(mnemonic);
+      try {
+        const oneTimePriv = recoverStealthPrivateKey(memo, keys.viewPriv, keys.spendPriv);
+        try {
+          const oneTimeAddress = addressForPrivateKey(oneTimePriv);
+          if (
+            typeof service.isFunded === 'function' &&
+            !(await service.isFunded(oneTimeAddress))
+          ) {
+            throw new ProtocolError(
+              'BAD_REQUEST',
+              'That one-time account has no claimable balance (already swept?).'
+            );
+          }
+          const sequence = await service.getSequence(oneTimeAddress);
+          const fee = Number((await service.getBaseFee?.()) ?? 100n);
+          // Raw-scalar signing: the one-time key is an additive derivation
+          // with no seed, so it cannot go through ed25519.sign (seed model).
+          const signed = signStellarAccountMergeWithScalar(
+            {
+              from: oneTimeAddress,
+              to: destination,
+              sequence,
+              fee,
+              networkPassphrase: passphrase,
+            },
+            oneTimePriv,
+          );
+          return service.sendTransaction(signed.raw);
+        } finally {
+          oneTimePriv.fill(0);
+        }
+      } finally {
+        keys.spendPriv.fill(0);
+        keys.viewPriv.fill(0);
+      }
+    });
+    void appendAudit('stellar.stealth.claimed', { announcementTxHash: payload.txHash, txHash });
+    return { txHash };
+  },
 };
 
 /** Decimal places used to convert human-readable token amounts to base units. */
@@ -2032,6 +2284,36 @@ async function resolveWcRequest(req: {
         'BAD_REQUEST',
         `WalletConnect method ${req.request.method} is not supported yet.`
       );
+  }
+}
+
+/**
+ * Renders a stroop amount as a human-readable XLM decimal for error messages.
+ */
+function formatStroopsAsXlm(stroops: bigint): string {
+  const whole = stroops / 10_000_000n;
+  const frac = (stroops % 10_000_000n).toString().padStart(7, '0').replace(/0+$/, '');
+  return frac.length === 0 ? `${whole}` : `${whole}.${frac}`;
+}
+
+/**
+ * Resolves a recipient's published stealth meta-address from their Stellar
+ * account data (manage_data `vpstealth`). Returns null when they have not
+ * published one (including when the entry is malformed — treated as absent,
+ * never fatal).
+ */
+async function fetchStealthMeta(
+  service: ChainService,
+  address: string,
+): Promise<StealthMeta | null> {
+  if (typeof service.getAccountDataEntries !== 'function') return null;
+  const entries = await service.getAccountDataEntries(address);
+  const raw = entries[STEALTH_DATA_KEY];
+  if (raw === undefined) return null;
+  try {
+    return decodeMetaValue(raw);
+  } catch {
+    return null;
   }
 }
 
@@ -2316,12 +2598,14 @@ async function buildAndBroadcast(
     asset?: StellarAssetInput | undefined;
     /** Optional Stellar MEMO_TEXT; rejected on other chains. */
     memo?: string | undefined;
+    /** Optional Stellar stealth (private) payment; rejected on other chains. */
+    private?: boolean | undefined;
   },
   amount: bigint,
   descriptor: TokenDescriptor,
   decimals: number,
   spendable: bigint
-): Promise<{ chain: ChainId; from: string; to: string; amountNative: string; hash: string }> {
+): Promise<{ chain: ChainId; from: string; to: string; amountNative: string; hash: string; private?: boolean }> {
   if (payload.memo !== undefined && payload.memo.trim().length > 0 && payload.chain !== 'stellar') {
     // Refuse rather than drop: silently discarding user input the UI collected
     // is exactly the "fake feature" failure mode this path must avoid.
@@ -2329,6 +2613,29 @@ async function buildAndBroadcast(
       'BAD_REQUEST',
       'Memos are only supported on Stellar transfers.'
     );
+  }
+  // Privacy payments: a one-time address is CREATED with the amount (native
+  // XLM only), and the 32-byte announcement occupies MEMO_HASH, so a text
+  // memo and issued assets are structurally impossible.
+  if (payload.private === true) {
+    if (payload.chain !== 'stellar') {
+      throw new ProtocolError(
+        'BAD_REQUEST',
+        'Private (stealth) payments are only supported on Stellar.'
+      );
+    }
+    if (payload.memo !== undefined && payload.memo.trim().length > 0) {
+      throw new ProtocolError(
+        'BAD_REQUEST',
+        'A private payment cannot carry a text memo — the memo slot carries the privacy announcement.'
+      );
+    }
+    if (descriptor.kind !== 'native') {
+      throw new ProtocolError(
+        'BAD_REQUEST',
+        'Private payments are XLM-only: the one-time account is created fresh and cannot hold issued assets.'
+      );
+    }
   }
   switch (payload.chain) {
     case 'evm': {
@@ -2487,6 +2794,98 @@ async function buildAndBroadcast(
       });
     }
     case 'stellar': {
+      // ── Privacy payment (pXLM stealth) ────────────────────────────────
+      // Derives a one-time address from the recipient's published
+      // meta-address, funds it via CREATE_ACCOUNT, and carries the 32-byte
+      // announcement in MEMO_HASH. The ephemeral key is zeroized right after
+      // the envelope is built — nothing ever needs it again (the receiver
+      // recovers the funds from the memo + their own keys).
+      if (payload.private === true) {
+        return vault.withAccount('stellar', payload.index, async (account) => {
+          const service = createChainService('stellar', await resolveStellarEndpoints());
+          if (
+            typeof service.isFunded === 'function' &&
+            !(await service.isFunded(account.address))
+          ) {
+            const stellarNetwork = await getSelectedNetwork('stellar');
+            throw new ProtocolError(
+              'BAD_REQUEST',
+              stellarNetwork.faucet
+                ? `This Stellar address has not been funded on ${stellarNetwork.name} yet. Use "Get testnet funds" first.`
+                : `This Stellar address has not been funded on ${stellarNetwork.name}.`
+            );
+          }
+
+          const meta = await fetchStealthMeta(service, payload.to);
+          if (meta === null) {
+            throw new ProtocolError(
+              'BAD_REQUEST',
+              'That address has not published a Veilpay privacy meta-address, so it cannot receive private payments yet.'
+            );
+          }
+
+          const fee = Number((await service.getBaseFee?.()) ?? 100n);
+          if (spendable < amount + BigInt(fee)) {
+            throw new ProtocolError(
+              'INSUFFICIENT_BALANCE',
+              'Insufficient XLM balance for the amount plus fee.'
+            );
+          }
+          // CREATE_ACCOUNT starting balances must cover the network's base
+          // reserve, otherwise the chain rejects the operation.
+          const baseReserve =
+            typeof service.getBaseReserve === 'function'
+              ? await service.getBaseReserve()
+              : 5_000_000n;
+          if (amount < baseReserve) {
+            throw new ProtocolError(
+              'BAD_REQUEST',
+              `A private payment must be at least the network base reserve (${formatStroopsAsXlm(baseReserve)} XLM): the one-time account is created holding the amount.`
+            );
+          }
+
+          const sequence = await service.getSequence(account.address);
+          const payment = deriveStealthPayment(meta);
+          let signed: ReturnType<typeof signStellarCreateAccount>;
+          try {
+            signed = signStellarCreateAccount(
+              {
+                from: account.address,
+                to: payment.oneTimeAddress,
+                startingBalance: amount,
+                sequence,
+                fee,
+                memoHash: payment.ephemeralPub,
+                networkPassphrase: await resolveStellarPassphrase(),
+              },
+              account.privateKey,
+            );
+          } finally {
+            // The ephemeral scalar is never needed again — not by the payer,
+            // not for recovery. Zeroize immediately.
+            payment.ephemeralPriv.fill(0);
+          }
+
+          if (signed.from !== account.address) {
+            throw new Error('Signer address does not match the derived account.');
+          }
+          const hash = await service.sendTransaction(signed.raw);
+          void appendAudit('stellar.stealth.sent', {
+            to: payment.oneTimeAddress,
+            amountStroops: amount.toString(),
+            hash,
+          });
+          return {
+            chain: 'stellar',
+            from: account.address,
+            to: payment.oneTimeAddress,
+            amountNative: amount.toString(),
+            hash,
+            private: true,
+          };
+        });
+      }
+
       return vault.withAccount('stellar', payload.index, async (account) => {
         const service = createChainService('stellar', await resolveStellarEndpoints());
 

@@ -175,7 +175,6 @@ export function Dashboard({
         setTxLoading(false);
       });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- network scope is a reload trigger
   }, [accounts, loadAllBalances, loadHistory, activeNetworkId]);
 
   /** Switches to a network: persists the network selection AND moves the

@@ -225,7 +225,9 @@ interface WalletActions {
     token?: TokenInputType,
     /** Optional Stellar MEMO_TEXT (≤ 28 bytes). */
     memo?: string,
-  ): Promise<{ hash: string; decimals: number }>;
+    /** Optional Stellar privacy payment (one-time stealth address). */
+    isPrivate?: boolean,
+  ): Promise<{ hash: string; decimals: number; to: string; private?: boolean }>;
   /** Security settings for the setup flow. Safe while locked. */
   loadSecurityStatus(): Promise<void>;
   setupSecurityPin(pin: string): Promise<boolean>;
@@ -307,6 +309,16 @@ interface WalletActions {
   removeToken(id: string): Promise<boolean>;
   /** Tokens: refresh balances for every registered token of one address. */
   loadTokenBalances(chain: ChainId, address: string): Promise<void>;
+  /** Privacy: the recipient's published stealth meta-address, or null. */
+  fetchStealthMeta(address: string): Promise<{ spendPub: string; viewPub: string } | null>;
+  /** Privacy: publish this wallet's meta-address (manage_data `vpstealth`). */
+  publishStealthMeta(): Promise<{ txHash: string; alreadyPublished: boolean }>;
+  /** Privacy: scan recent announcements for claimable one-time payments. */
+  scanStealthPayments(): Promise<
+    Array<{ txHash: string; oneTimeAddress: string; amountStroops: string; createdAt: string }>
+  >;
+  /** Privacy: sweep a found one-time payment into the wallet's Stellar account. */
+  claimStealthPayment(txHash: string): Promise<{ txHash: string }>;
 }
 
 const send = createClient('popup' as MessageSource);
@@ -643,7 +655,7 @@ export const useWallet = create<WalletState & WalletActions>((set, get) => ({
     }
   },
 
-  sendTransfer: async (chain, index, to, amount, asset, token, memo) => {
+  sendTransfer: async (chain, index, to, amount, asset, token, memo, isPrivate) => {
     set({ error: null });
     try {
       const payload: {
@@ -654,11 +666,19 @@ export const useWallet = create<WalletState & WalletActions>((set, get) => ({
         asset?: StellarAssetInput;
         token?: TokenInputType;
         memo?: string;
+        private?: boolean;
       } = { chain, index, to, amount };
       if (asset !== undefined) payload.asset = asset;
       if (token !== undefined) payload.token = token;
       if (memo !== undefined && memo.trim().length > 0) payload.memo = memo.trim();
-      return await send('tx.transfer', payload);
+      if (isPrivate === true) payload.private = true;
+      const result = await send('tx.transfer', payload);
+      return {
+        hash: result.hash,
+        decimals: result.decimals,
+        to: result.to,
+        ...(result.private === true ? { private: true } : {}),
+      };
     } catch (cause) {
       set({ error: messageFor(cause, 'Could not send the transfer.') });
       throw cause;
@@ -1070,6 +1090,50 @@ export const useWallet = create<WalletState & WalletActions>((set, get) => ({
       set({ tokenBalances: next });
     } catch {
       // Optional read; failures leave the previous balances rendered.
+    }
+  },
+
+  fetchStealthMeta: async (address) => {
+    try {
+      return await send('stellar.stealth.meta', { address });
+    } catch {
+      // A failed lookup behaves exactly like "not published": the UI keeps
+      // the send flow usable and only disables the private toggle.
+      return null;
+    }
+  },
+
+  publishStealthMeta: async () => {
+    set({ isLoading: true, error: null });
+    try {
+      return await send('stellar.stealth.publish', {});
+    } catch (cause) {
+      set({ error: messageFor(cause, 'Could not publish the privacy meta-address.') });
+      throw cause;
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
+  scanStealthPayments: async () => {
+    try {
+      const found = await send('stellar.stealth.scan', {});
+      return Array.isArray(found) ? found : [];
+    } catch (cause) {
+      set({ error: messageFor(cause, 'Could not scan for private payments.') });
+      throw cause;
+    }
+  },
+
+  claimStealthPayment: async (txHash) => {
+    set({ isLoading: true, error: null });
+    try {
+      return await send('stellar.stealth.claim', { txHash });
+    } catch (cause) {
+      set({ error: messageFor(cause, 'Could not claim the private payment.') });
+      throw cause;
+    } finally {
+      set({ isLoading: false });
     }
   },
 }));

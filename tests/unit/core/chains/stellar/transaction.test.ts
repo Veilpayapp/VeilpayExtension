@@ -2,8 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { ed25519 } from '@noble/curves/ed25519';
 import { sha256 } from '@noble/hashes/sha256';
 import {
+  decodeStellarAddress,
   encodeStellarAddress,
+  signStellarAccountMerge,
+  signStellarAccountMergeWithScalar,
   signStellarChangeTrust,
+  signStellarCreateAccount,
+  signStellarManageData,
   signStellarPayment,
   STELLAR_TRUSTLINE_NO_LIMIT,
 } from '@/core/chains/stellar/transaction';
@@ -474,13 +479,13 @@ describe('Stellar change-trust serialization (add-token trustline)', () => {
     // Envelope layout: [uint32 2 (envelope disc)] then the Transaction XDR:
     // [pubkey 36][fee 4][seq 8][precond 4][memo 4][ops…][ext 4].
     // Operations: uint32 count=1, then each op: [source ptr 4][body…].
-    // Body: uint32 type 7 (CHANGE_TRUST) + Asset + int64 limit.
+    // Body: uint32 type 6 (CHANGE_TRUST) + Asset + int64 limit.
     const opsStart = 4 + 36 + 4 + 8 + 4 + 4; // envelope disc + up to and incl. memo
     expect(raw.slice(opsStart, opsStart + 4)).toEqual(new Uint8Array([0, 0, 0, 1])); // 1 op
     const opStart = opsStart + 4;
     expect(raw.slice(opStart, opStart + 4)).toEqual(new Uint8Array([0, 0, 0, 0])); // null source
     const bodyStart = opStart + 4;
-    expect(raw.slice(bodyStart, bodyStart + 4)).toEqual(new Uint8Array([0, 0, 0, 7])); // CHANGE_TRUST
+    expect(raw.slice(bodyStart, bodyStart + 4)).toEqual(new Uint8Array([0, 0, 0, 6])); // CHANGE_TRUST = 6
     // Asset: CREDIT_ALPHANUM4 (1) + code[4] "USDC" + pubkey(0+32).
     const assetStart = bodyStart + 4;
     expect(raw.slice(assetStart, assetStart + 4)).toEqual(new Uint8Array([0, 0, 0, 1]));
@@ -527,5 +532,214 @@ describe('Stellar change-trust serialization (add-token trustline)', () => {
     // A different passphrase produces a different signing hash — the
     // trustline is network-bound, exactly like a payment.
     expect(testnet.signingHash).not.toBe(mainnet.signingHash);
+  });
+});
+
+describe('Stellar create-account serialization (privacy payment)', () => {
+  /** A 32-byte stealth announcement for MEMO_HASH. */
+  const ANNOUNCEMENT = Uint8Array.from({ length: 32 }, (_, i) => (i % 7) + 1);
+
+  function build() {
+    return signStellarCreateAccount(
+      {
+        from: SOURCE_ADDRESS,
+        to: DEST_ADDRESS,
+        startingBalance: 5_000_000n, // 0.5 XLM (base reserve)
+        sequence: 120n,
+        fee: 100,
+        memoHash: ANNOUNCEMENT,
+      },
+      PRIVATE_KEY,
+    );
+  }
+
+  it('signs an envelope whose signature verifies', () => {
+    const result = build();
+    expect(() => atob(result.raw)).not.toThrow();
+    expect(result.from).toBe(SOURCE_ADDRESS);
+
+    const envelope = Uint8Array.from(atob(result.raw), (c) => c.charCodeAt(0));
+    const sig = envelope.slice(envelope.length - 64);
+    const signingHashBytes = Uint8Array.from(
+      result.signingHash.match(/.{2}/g)!.map((h) => parseInt(h, 16)),
+    );
+    expect(
+      ed25519.verify(sig, signingHashBytes, ed25519.getPublicKey(PRIVATE_KEY)),
+    ).toBe(true);
+  });
+
+  it('carries the announcement as a fixed MEMO_HASH (union 2, no length prefix)', () => {
+    const raw = Uint8Array.from(atob(build().raw), (c) => c.charCodeAt(0));
+    // [envelope disc 4][source 36][fee 4][seq 8][precond 4] = 56
+    // MEMO_HASH: [uint32 2][32 raw bytes] — exactly 36 bytes, no opaque length.
+    expect(raw.slice(56, 60)).toEqual(new Uint8Array([0, 0, 0, 2])); // MEMO_HASH
+    expect(raw.slice(60, 92)).toEqual(ANNOUNCEMENT);
+    // Ops count follows immediately at 92 — proving no length prefix shifted it.
+    expect(raw.slice(92, 96)).toEqual(new Uint8Array([0, 0, 0, 1]));
+  });
+
+  it('encodes CREATE_ACCOUNT = 0 with the destination and starting balance', () => {
+    const raw = Uint8Array.from(atob(build().raw), (c) => c.charCodeAt(0));
+    // Op: [source ptr 4][type 4][dest pubkey 36][int64 balance 8]
+    const opStart = 96;
+    expect(raw.slice(opStart, opStart + 4)).toEqual(new Uint8Array([0, 0, 0, 0])); // null source
+    expect(raw.slice(opStart + 4, opStart + 8)).toEqual(new Uint8Array([0, 0, 0, 0])); // CREATE_ACCOUNT
+    expect(raw.slice(opStart + 8, opStart + 12)).toEqual(new Uint8Array([0, 0, 0, 0])); // KEY_TYPE_ED25519
+    expect(raw.slice(opStart + 12, opStart + 44)).toEqual(DEST_PUBKEY);
+    expect(Array.from(raw.slice(opStart + 44, opStart + 52))).toEqual([
+      0, 0, 0, 0, 0, 0x4c, 0x4b, 0x40,
+    ]); // 5_000_000
+  });
+
+  it('rejects a non-32-byte announcement', () => {
+    expect(() =>
+      signStellarCreateAccount(
+        {
+          from: SOURCE_ADDRESS,
+          to: DEST_ADDRESS,
+          startingBalance: 5_000_000n,
+          sequence: 120n,
+          fee: 100,
+          memoHash: new Uint8Array(31),
+        },
+        PRIVATE_KEY,
+      ),
+    ).toThrow('32 bytes');
+  });
+});
+
+describe('Stellar manage-data serialization (stealth meta publish)', () => {
+  /** spendPub || viewPub — the 64-byte meta-address value. */
+  const META_VALUE = Uint8Array.from({ length: 64 }, (_, i) => (i % 11) + 2);
+
+  function build() {
+    return signStellarManageData(
+      {
+        from: SOURCE_ADDRESS,
+        name: 'vpstealth',
+        value: META_VALUE,
+        sequence: 120n,
+        fee: 100,
+      },
+      PRIVATE_KEY,
+    );
+  }
+
+  it('encodes MANAGE_DATA = 10 (regression: 11 is BUMP_SEQUENCE)', () => {
+    const raw = Uint8Array.from(atob(build().raw), (c) => c.charCodeAt(0));
+    // [envelope 4][source 36][fee 4][seq 8][precond 4][MEMO_NONE 4] = 60
+    // [op count 4] = 64, then op: [source ptr 4][type 4] = 72.
+    expect(raw.slice(60, 64)).toEqual(new Uint8Array([0, 0, 0, 1])); // 1 op
+    expect(raw.slice(64, 68)).toEqual(new Uint8Array([0, 0, 0, 0])); // null source
+    expect(raw.slice(68, 72)).toEqual(new Uint8Array([0, 0, 0, 10])); // MANAGE_DATA = 10
+  });
+
+  it('encodes the 9-byte name XDR-aligned and the 64-byte value as a non-null pointer', () => {
+    const raw = Uint8Array.from(atob(build().raw), (c) => c.charCodeAt(0));
+    // name: string<64> = [uint32 len 9][9 bytes][3 pad] = 16 bytes at 72..88
+    expect(raw.slice(72, 76)).toEqual(new Uint8Array([0, 0, 0, 9]));
+    expect(new TextDecoder().decode(raw.slice(76, 85))).toBe('vpstealth');
+    expect(raw.slice(85, 88)).toEqual(new Uint8Array(3)); // XDR alignment
+    // value: DataValue* = [uint32 1 (non-null)][opaque: uint32 64 + 64 bytes]
+    expect(raw.slice(88, 92)).toEqual(new Uint8Array([0, 0, 0, 1]));
+    expect(raw.slice(92, 96)).toEqual(new Uint8Array([0, 0, 0, 64]));
+    expect(raw.slice(96, 160)).toEqual(META_VALUE);
+  });
+
+  it('a null value encodes as the null pointer (delete)', () => {
+    const raw = Uint8Array.from(
+      atob(
+        signStellarManageData(
+          { from: SOURCE_ADDRESS, name: 'vpstealth', value: null, sequence: 120n, fee: 100 },
+          PRIVATE_KEY,
+        ).raw,
+      ),
+      (c) => c.charCodeAt(0),
+    );
+    expect(raw.slice(88, 92)).toEqual(new Uint8Array([0, 0, 0, 0])); // DataValue* = null
+  });
+
+  it('rejects oversized names and values', () => {
+    expect(() =>
+      signStellarManageData(
+        { from: SOURCE_ADDRESS, name: 'x'.repeat(65), value: META_VALUE, sequence: 1n, fee: 100 },
+        PRIVATE_KEY,
+      ),
+    ).toThrow('64');
+    expect(() =>
+      signStellarManageData(
+        { from: SOURCE_ADDRESS, name: 'vpstealth', value: new Uint8Array(65), sequence: 1n, fee: 100 },
+        PRIVATE_KEY,
+      ),
+    ).toThrow('64');
+  });
+});
+
+describe('Stellar account-merge serialization (privacy claim sweep)', () => {
+  function build() {
+    return signStellarAccountMerge(
+      { from: SOURCE_ADDRESS, to: DEST_ADDRESS, sequence: 120n, fee: 100 },
+      PRIVATE_KEY,
+    );
+  }
+
+  it('encodes ACCOUNT_MERGE = 8 with the destination key', () => {
+    const raw = Uint8Array.from(atob(build().raw), (c) => c.charCodeAt(0));
+    // [envelope 4][source 36][fee 4][seq 8][precond 4][MEMO_NONE 4] = 60
+    // [op count 4][source ptr 4] → type at 68.
+    expect(raw.slice(60, 64)).toEqual(new Uint8Array([0, 0, 0, 1])); // 1 op
+    expect(raw.slice(64, 68)).toEqual(new Uint8Array([0, 0, 0, 0])); // null source
+    expect(raw.slice(68, 72)).toEqual(new Uint8Array([0, 0, 0, 8])); // ACCOUNT_MERGE = 8
+    // Body: just the AccountID destination.
+    expect(raw.slice(72, 76)).toEqual(new Uint8Array([0, 0, 0, 0])); // KEY_TYPE_ED25519
+    expect(raw.slice(76, 108)).toEqual(DEST_PUBKEY);
+  });
+
+  it('signs a seed-key merge envelope that verifies against the signer key', () => {
+    // The signer's public key must be the merged source account.
+    const signerPub = ed25519.getPublicKey(PRIVATE_KEY);
+    const from = encodeStellarAddress(signerPub);
+    const result = signStellarAccountMerge(
+      { from, to: DEST_ADDRESS, sequence: 120n, fee: 100 },
+      PRIVATE_KEY,
+    );
+    expect(result.from).toBe(from);
+    const envelope = Uint8Array.from(atob(result.raw), (c) => c.charCodeAt(0));
+    const sig = envelope.slice(envelope.length - 64);
+    const signingHashBytes = Uint8Array.from(
+      result.signingHash.match(/.{2}/g)!.map((h) => parseInt(h, 16)),
+    );
+    expect(ed25519.verify(sig, signingHashBytes, signerPub)).toBe(true);
+  });
+
+  it('signs a raw-scalar merge (the one-time claim path) that standard Ed25519 accepts', () => {
+    // The real claim: the source is a stealth one-time address and the key
+    // is an additive scalar — no seed exists. The signature must still be a
+    // plain Ed25519 signature over the network hash.
+    const oneTimeScalar = Uint8Array.from({ length: 32 }, (_, i) => (i % 5) + 1);
+    const oneTimePub = ed25519.ExtendedPoint.BASE.multiply(
+      BigInt('0x' + Array.from(oneTimeScalar).map((b) => b.toString(16).padStart(2, '0')).join('')),
+    ).toRawBytes();
+    const oneTimeAddress = encodeStellarAddress(oneTimePub);
+
+    const result = signStellarAccountMergeWithScalar(
+      { from: oneTimeAddress, to: DEST_ADDRESS, sequence: 5_000n, fee: 100 },
+      oneTimeScalar,
+    );
+    expect(result.from).toBe(oneTimeAddress);
+
+    const envelope = Uint8Array.from(atob(result.raw), (c) => c.charCodeAt(0));
+    const sig = envelope.slice(envelope.length - 64);
+    const signingHashBytes = Uint8Array.from(
+      result.signingHash.match(/.{2}/g)!.map((h) => parseInt(h, 16)),
+    );
+    // Standard verification — exactly what Horizon runs.
+    expect(ed25519.verify(sig, signingHashBytes, oneTimePub)).toBe(true);
+  });
+
+  it('the source address decodes back to the source pubkey', () => {
+    // The one-time claim path relies on from = the one-time address.
+    expect(decodeStellarAddress(SOURCE_ADDRESS)).toEqual(SOURCE_PUBKEY);
+    expect(encodeStellarAddress(decodeStellarAddress(DEST_ADDRESS))).toBe(DEST_ADDRESS);
   });
 });

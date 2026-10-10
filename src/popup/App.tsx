@@ -153,6 +153,12 @@ export default function App() {
   const [sendSpendable, setSendSpendable] = useState<string | null>(null);
   const [sendStatus, setSendStatus] = useState<'fee' | 'confirm' | 'sending' | 'done'>('fee');
   const [sendHash, setSendHash] = useState<string | null>(null);
+  /** Stellar privacy payment (one-time stealth address) toggle. */
+  const [sendPrivate, setSendPrivate] = useState(false);
+  /** The transfer's actual on-chain destination (the one-time address for a
+   *  private send), so the receipt tells the truth instead of echoing the
+   *  typed recipient. */
+  const [sendReceiptTo, setSendReceiptTo] = useState<string | null>(null);
   const [receiveIdx, setReceiveIdx] = useState(0);
   const [importPhrase, setImportPhrase] = useState('');
   const [importPass1, setImportPass1] = useState('');
@@ -375,6 +381,8 @@ export default function App() {
     setSendSpendable(null);
     setSendStatus('fee');
     setSendHash(null);
+    setSendPrivate(false);
+    setSendReceiptTo(null);
     setView('send');
   };
 
@@ -414,11 +422,11 @@ export default function App() {
     [sendAccount, sendTo, sendAmount, sendAsset, sendToken, estimateTransfer],
   );
 
-  const handleSendConfirm = async (memo?: string) => {
+  const handleSendConfirm = async (memo?: string, isPrivate?: boolean) => {
     if (sendAccount === null) return;
     setSendStatus('sending');
     try {
-      const { hash } = await sendTransfer(
+      const { hash, to, private: wasPrivate } = await sendTransfer(
         sendAccount.chain,
         sendAccount.index,
         sendTo,
@@ -426,8 +434,12 @@ export default function App() {
         sendAsset,
         sendToken ?? tokenFromAsset(sendAsset),
         memo,
+        isPrivate === true,
       );
       setSendHash(hash);
+      // A private payment lands on a one-time address — the receipt must
+      // show that, not the recipient's public address they typed.
+      setSendReceiptTo(wasPrivate === true ? to : null);
       setSendStatus('done');
     } catch {
       setSendStatus('fee');
@@ -665,15 +677,18 @@ export default function App() {
             sendSpendable={sendSpendable}
             sendStatus={sendStatus}
             sendHash={sendHash}
+            sendPrivate={sendPrivate}
+            sendReceiptTo={sendReceiptTo}
             isLoading={isLoading}
             error={error}
             onToChange={setSendTo}
             onAmountChange={setSendAmount}
             onMemoChange={setSendMemo}
+            onPrivateChange={setSendPrivate}
             onAssetChange={setSendAsset}
             onTokenChange={setSendToken}
             onEstimate={handleSendFee}
-            onConfirm={() => void handleSendConfirm(sendMemo)}
+            onConfirm={() => void handleSendConfirm(sendMemo, sendPrivate)}
             onBack={() => setView('accounts')}
             onClearError={clearError}
             onOpenScan={() => setScanModalOpen(true)}
@@ -1146,11 +1161,14 @@ function SendForm({
   sendSpendable,
   sendStatus,
   sendHash,
+  sendPrivate,
+  sendReceiptTo,
   isLoading,
   error,
   onToChange,
   onAmountChange,
   onMemoChange,
+  onPrivateChange,
   onAssetChange,
   onTokenChange,
   onEstimate,
@@ -1171,11 +1189,14 @@ function SendForm({
   sendSpendable: string | null;
   sendStatus: 'fee' | 'confirm' | 'sending' | 'done';
   sendHash: string | null;
+  sendPrivate: boolean;
+  sendReceiptTo: string | null;
   isLoading: boolean;
   error: string | null;
   onToChange: (v: string) => void;
   onAmountChange: (v: string) => void;
   onMemoChange: (v: string) => void;
+  onPrivateChange: (v: boolean) => void;
   onAssetChange: (a: StellarAssetInput | undefined) => void;
   onTokenChange: (t: TokenInputType | undefined) => void;
   onEstimate: (token?: TokenInputType) => Promise<void>;
@@ -1191,7 +1212,7 @@ function SendForm({
   const feeSymbol =
     account.chain === 'evm' ? 'Gwei' : account.chain === 'solana' ? 'lamports' : 'stroops';
 
-  const { balances, networks, selectedNetworks, customTokens } = useWallet();
+  const { balances, networks, selectedNetworks, customTokens, fetchStealthMeta } = useWallet();
   // The live network name for this account's chain — mainnet or testnet,
   // whichever is selected. Receipts and headers must never hardcode TESTNET.
   const networkName = networkLabel(account.chain, networks, selectedNetworks).toUpperCase();
@@ -1286,13 +1307,55 @@ function SendForm({
         })()
       : false;
 
+  // ── Stellar privacy payments (pXLM stealth) ─────────────────────────────
+  // The toggle exists only for Stellar native XLM: an issued asset can never
+  // ride a one-time CREATE_ACCOUNT, and other chains have no stealth layer.
+  const privacyAvailable = isStellar && (sendToken === undefined || sendToken.kind === 'native');
+
+  // The selection can change under a live toggle (user picks an issued asset
+  // or an ERC-20) — drop private mode the moment it becomes impossible.
+  useEffect(() => {
+    if (!privacyAvailable && sendPrivate) onPrivateChange(false);
+  }, [privacyAvailable, sendPrivate, onPrivateChange]);
+
+  /** Whether the recipient looks like a Stellar G… strkey worth checking. */
+  const recipientLooksStellar = /^G[A-Z2-7]{55}$/.test(sendTo.trim());
+  const [recipientPrivacy, setRecipientPrivacy] = useState<
+    'unknown' | 'checking' | 'available' | 'unavailable'
+  >('unknown');
+
+  // Look the recipient's published meta-address up (read-only) so the form
+  // can say WHY private mode is unavailable instead of failing at send time.
+  useEffect(() => {
+    if (!sendPrivate || !recipientLooksStellar) {
+      setRecipientPrivacy('unknown');
+      return;
+    }
+    let cancelled = false;
+    setRecipientPrivacy('checking');
+    void fetchStealthMeta(sendTo.trim()).then((meta) => {
+      if (cancelled) return;
+      setRecipientPrivacy(meta !== null ? 'available' : 'unavailable');
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [sendPrivate, recipientLooksStellar, sendTo, fetchStealthMeta]);
+
+  /** A private send needs a recipient that actually published a meta-address. */
+  const privateBlocked =
+    sendPrivate &&
+    (recipientPrivacy === 'unavailable' ||
+      (sendTo.trim().length > 0 && !recipientLooksStellar));
+
   const disableSend =
     isLoading ||
     sendStatus === 'sending' ||
     sendTo.length === 0 ||
     sendAmount.length === 0 ||
     ready === false ||
-    insufficientBalance;
+    insufficientBalance ||
+    privateBlocked;
 
   // ── Real available balance ──────────────────────────────────────────────
   // The estimate's spendable is authoritative once present (token-aware, and
@@ -1351,7 +1414,9 @@ function SendForm({
             hash: sendHash,
             chain: account.chain,
             from: account.address,
-            to: sendTo,
+            // A private payment's real destination is the one-time address
+            // the background derived — show that, not the typed recipient.
+            to: sendReceiptTo ?? sendTo,
             amount: sendAmount,
             symbol: assetLabel,
             networkName,
@@ -1730,10 +1795,73 @@ function SendForm({
           ))}
         </div>
 
+        {/* PRIVATE PAYMENT (Stellar stealth) — one-time address derived from
+            the recipient's published meta-address; the payment is unlinkable
+            on-chain. Only Stellar native XLM; issued assets and other chains
+            hide the toggle entirely. */}
+        {isStellar && (
+          <div className="flex flex-col gap-1.5">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={sendPrivate}
+              aria-label="Private payment"
+              disabled={!privacyAvailable || isLoading || sendStatus === 'sending'}
+              onClick={() => {
+                onPrivateChange(!sendPrivate);
+                onClearError();
+              }}
+              className="flex items-center justify-between rounded-xl border border-surface-700/80 bg-surface-800/80 px-3 py-2.5 text-left transition-all hover:border-accent-500/40 disabled:opacity-40"
+            >
+              <span className="flex flex-col gap-0.5">
+                <span className="flex items-center gap-1.5 font-mono text-[10px] font-semibold tracking-wider text-content-secondary uppercase">
+                  <Glyph name="lock" className="h-3.5 w-3.5 text-accent-500" />
+                  PRIVATE PAYMENT
+                </span>
+                <span className="font-mono text-[10px] text-content-tertiary">
+                  One-time address · unlinkable
+                </span>
+              </span>
+              <span
+                aria-hidden
+                className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${
+                  sendPrivate ? 'bg-accent-500' : 'bg-surface-700'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${
+                    sendPrivate ? 'left-[18px]' : 'left-0.5'
+                  }`}
+                />
+              </span>
+            </button>
+            {sendPrivate && (
+              <p
+                className={`font-mono text-[10px] leading-relaxed ${
+                  recipientPrivacy === 'available'
+                    ? 'text-success'
+                    : recipientPrivacy === 'unavailable'
+                      ? 'text-warning'
+                      : 'text-content-tertiary'
+                }`}
+              >
+                {recipientPrivacy === 'checking' && 'Checking whether the recipient accepts private payments…'}
+                {recipientPrivacy === 'available' &&
+                  'Recipient accepts private payments — the amount lands on a fresh one-time address only they can unlock.'}
+                {recipientPrivacy === 'unavailable' &&
+                  'This recipient has not enabled private payments in Veilpay yet. Turn the toggle off to send normally.'}
+                {recipientPrivacy === 'unknown' &&
+                  'Pays a fresh one-time address derived from the recipient’s published privacy keys.'}
+              </p>
+            )}
+          </div>
+        )}
+
         {/* MEMO (OPTIONAL) — Stellar only (the only chain with transaction
             memos in this wallet), and actually sent: it is attached as
-            MEMO_TEXT by the background's XDR builder. */}
-        {isStellar && (
+            MEMO_TEXT by the background's XDR builder. Hidden for private
+            payments: the 32-byte announcement occupies MEMO_HASH. */}
+        {isStellar && !sendPrivate && (
           <div>
             <label
               htmlFor="send-memo"
@@ -1816,12 +1944,94 @@ function ReceiveView({
   onBack: () => void;
   onTabSelect?: (tab: TacticalTab) => void;
 }) {
-  const { requestFaucet, networks, selectedNetworks } = useWallet();
+  const {
+    requestFaucet,
+    networks,
+    selectedNetworks,
+    fetchStealthMeta,
+    publishStealthMeta,
+    scanStealthPayments,
+    claimStealthPayment,
+  } = useWallet();
   const [faucetState, setFaucetState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [faucetError, setFaucetError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [requestAmount, setRequestAmount] = useState('');
   const [linkCopied, setLinkCopied] = useState(false);
+
+  // ── Stellar privacy payments (pXLM stealth) ─────────────────────────────
+  // Receive-side surface: publish the meta-address other Veilpay payers use
+  // to derive one-time addresses for this account, and scan/claim incoming
+  // private payments.
+  const isStellar = account.chain === 'stellar';
+  const [privacyPublished, setPrivacyPublished] = useState<'unknown' | 'yes' | 'no'>('unknown');
+  const [privacyBusy, setPrivacyBusy] = useState(false);
+  const [privacyMsg, setPrivacyMsg] = useState<string | null>(null);
+  const [privacyScan, setPrivacyScan] = useState<
+    Array<{ txHash: string; oneTimeAddress: string; amountStroops: string; createdAt: string }>
+  >([]);
+  const [privacyScanning, setPrivacyScanning] = useState(false);
+  const [claimingTx, setClaimingTx] = useState<string | null>(null);
+
+  // Check the published state whenever the address or network changes.
+  useEffect(() => {
+    if (!isStellar) return;
+    let cancelled = false;
+    void fetchStealthMeta(account.address).then((meta) => {
+      if (cancelled) return;
+      setPrivacyPublished(meta !== null ? 'yes' : 'no');
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isStellar, account.address, fetchStealthMeta, selectedNetworks]);
+
+  const handlePublishPrivacy = async () => {
+    setPrivacyBusy(true);
+    setPrivacyMsg(null);
+    try {
+      const result = await publishStealthMeta();
+      setPrivacyPublished('yes');
+      setPrivacyMsg(
+        result.alreadyPublished
+          ? 'Privacy meta-address already published.'
+          : 'Privacy meta-address published — others can now pay you privately.',
+      );
+    } catch {
+      // error surfaces via the store's error banner
+    } finally {
+      setPrivacyBusy(false);
+    }
+  };
+
+  const handleScanPrivacy = async () => {
+    setPrivacyScanning(true);
+    setPrivacyMsg(null);
+    try {
+      const found = await scanStealthPayments();
+      setPrivacyScan(found);
+    } catch {
+      // error surfaces via the store's error banner
+    } finally {
+      setPrivacyScanning(false);
+    }
+  };
+
+  const handleClaimPrivacy = async (txHash: string) => {
+    setClaimingTx(txHash);
+    setPrivacyMsg(null);
+    try {
+      const { txHash: sweepHash } = await claimStealthPayment(txHash);
+      setPrivacyMsg(`Claimed — sweep transaction ${sweepHash.slice(0, 12)}…`);
+      // Re-scan so the claimed entry disappears from the list.
+      const found = await scanStealthPayments().catch(() => null);
+      if (found !== null) setPrivacyScan(found);
+    } catch {
+      // error surfaces via the store's error banner
+    } finally {
+      setClaimingTx(null);
+    }
+  };
 
   const nativeSymbol =
     account.chain === 'evm' ? 'ETH' : account.chain === 'solana' ? 'SOL' : 'XLM';
@@ -2012,6 +2222,90 @@ function ReceiveView({
           <p className="mt-1 font-mono text-[11px] leading-relaxed text-content-tertiary text-center">
             This is a live network — send real {nativeSymbol} to this address.
           </p>
+        )}
+
+        {/* ── Private payments (Stellar stealth) ───────────────────────────
+            Publish the meta-address payers derive one-time addresses from,
+            and scan + claim incoming private payments. */}
+        {isStellar && (
+          <div className="flex flex-col gap-2 rounded-2xl border border-surface-700/60 bg-surface-800/70 p-3.5 animate-fade-in-up">
+            <div className="flex items-center justify-between">
+              <span className="flex items-center gap-1.5 font-mono text-[10px] font-semibold tracking-wider text-content-secondary uppercase">
+                <Glyph name="lock" className="h-3.5 w-3.5 text-accent-500" />
+                PRIVATE PAYMENTS
+              </span>
+              <span
+                className={`font-mono text-[10px] font-semibold ${
+                  privacyPublished === 'yes' ? 'text-success' : 'text-content-tertiary'
+                }`}
+              >
+                {privacyPublished === 'yes'
+                  ? 'ENABLED'
+                  : privacyPublished === 'no'
+                    ? 'OFF'
+                    : '…'}
+              </span>
+            </div>
+
+            <p className="font-mono text-[10px] leading-relaxed text-content-tertiary">
+              One-time addresses derived from your published keys — payments to
+              you are unlinkable on-chain.
+            </p>
+
+            {privacyPublished !== 'yes' && (
+              <Button
+                fullWidth
+                variant="secondary"
+                onClick={() => void handlePublishPrivacy()}
+                disabled={privacyBusy}
+              >
+                {privacyBusy ? 'Publishing…' : 'Enable private payments'}
+              </Button>
+            )}
+
+            <Button
+              fullWidth
+              variant="ghost"
+              onClick={() => void handleScanPrivacy()}
+              disabled={privacyScanning || privacyBusy}
+            >
+              {privacyScanning ? 'Scanning…' : 'Scan for private payments'}
+            </Button>
+
+            {privacyScan.length > 0 && (
+              <div className="flex flex-col gap-2 animate-fade-in">
+                {privacyScan.map((entry) => (
+                  <div
+                    key={entry.txHash}
+                    className="flex items-center justify-between gap-2 rounded-xl border border-surface-700 bg-surface-800/90 p-2.5"
+                  >
+                    <div className="flex min-w-0 flex-col gap-0.5">
+                      <span className="font-mono text-xs font-bold text-content-primary">
+                        {baseToDecimal(BigInt(entry.amountStroops), 7, 7)} XLM
+                      </span>
+                      <span className="truncate font-mono text-[10px] text-content-tertiary">
+                        One-time {entry.oneTimeAddress.slice(0, 8)}…{entry.oneTimeAddress.slice(-6)}
+                      </span>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      onClick={() => void handleClaimPrivacy(entry.txHash)}
+                      disabled={claimingTx !== null}
+                    >
+                      {claimingTx === entry.txHash ? 'Claiming…' : 'Claim'}
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {privacyMsg !== null && (
+              <p className="font-mono text-[10px] leading-relaxed text-success animate-fade-in">
+                {privacyMsg}
+              </p>
+            )}
+          </div>
         )}
       </div>
 

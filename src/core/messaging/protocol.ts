@@ -104,6 +104,10 @@ export const RequestKind = z.enum([
   'tokens.add',
   'tokens.remove',
   'tokens.balances',
+  'stellar.stealth.meta',
+  'stellar.stealth.publish',
+  'stellar.stealth.scan',
+  'stellar.stealth.claim',
 ]);
 export type RequestKind = z.infer<typeof RequestKind>;
 
@@ -190,6 +194,12 @@ export const PRIVILEGED_KINDS: readonly RequestKind[] = [
   // surfaces may do it, never a page.
   'tokens.add',
   'tokens.remove',
+  // Stealth publish/claim derive keys from the vault and broadcast; scan
+  // derives the wallet's own view/spend keys. All three require an unlocked
+  // vault and must never be reachable from a page.
+  'stellar.stealth.publish',
+  'stellar.stealth.scan',
+  'stellar.stealth.claim',
 ] as const;
 
 export function isPrivilegedKind(kind: RequestKind): boolean {
@@ -426,6 +436,15 @@ export const TxTransferRequest = baseEnvelope.extend({
      * other chains reject the field rather than silently dropping it.
      */
     memo: z.string().max(28).optional(),
+    /**
+     * Stellar privacy payment: pay the recipient through a one-time stealth
+     * address derived from their published meta-address, so the payment is
+     * unlinkable on-chain. Requires the recipient to have published a
+     * meta-address (manage_data `vpstealth`); the transfer fails with a clear
+     * error if they have not. Incompatible with a text memo (the 32-byte
+     * announcement rides in MEMO_HASH). Other chains reject the flag.
+     */
+    private: z.boolean().optional(),
   }),
 });
 
@@ -987,6 +1006,53 @@ export const TokensBalancesRequest = baseEnvelope.extend({
   }),
 });
 
+// ── Stellar privacy payments (pXLM stealth) ────────────────────────────────
+
+/**
+ * Resolves a recipient's published stealth meta-address — the public
+ * {spendPub, viewPub} pair a Veilpay wallet writes into its account data.
+ * Read-only; anyone may look it up, exactly like a public address.
+ */
+export const StellarStealthMetaRequest = baseEnvelope.extend({
+  kind: z.literal('stellar.stealth.meta'),
+  payload: z.object({
+    /** The recipient's ordinary Stellar address (G...). */
+    address: z.string().regex(/^G[A-Z2-7]{55}$/),
+  }),
+});
+
+/**
+ * Publishes THIS wallet's stealth meta-address onto its Stellar account
+ * (manage_data `vpstealth`), so payers can derive private one-time addresses
+ * for it. Privileged: signs with the vault key.
+ */
+export const StellarStealthPublishRequest = baseEnvelope.extend({
+  kind: z.literal('stellar.stealth.publish'),
+  payload: z.object({}),
+});
+
+/**
+ * Scans recent network transactions for stealth payments THIS wallet can
+ * recover (the Monero-style view-key scan). Privileged: derives the wallet's
+ * view/spend keys, which requires the unlocked vault.
+ */
+export const StellarStealthScanRequest = baseEnvelope.extend({
+  kind: z.literal('stellar.stealth.scan'),
+  payload: z.object({}),
+});
+
+/**
+ * Sweeps a found one-time account into the wallet's ordinary Stellar
+ * account, signing with the derived one-time key. Privileged.
+ */
+export const StellarStealthClaimRequest = baseEnvelope.extend({
+  kind: z.literal('stellar.stealth.claim'),
+  payload: z.object({
+    /** The announcement transaction's hash (from `stellar.stealth.scan`). */
+    txHash: z.string().min(1),
+  }),
+});
+
 export const Request = z.discriminatedUnion('kind', [
   PingRequest,
   VaultStatusRequest,
@@ -1056,6 +1122,10 @@ export const Request = z.discriminatedUnion('kind', [
   TokensAddRequest,
   TokensRemoveRequest,
   TokensBalancesRequest,
+  StellarStealthMetaRequest,
+  StellarStealthPublishRequest,
+  StellarStealthScanRequest,
+  StellarStealthClaimRequest,
 ]);
 export type Request = z.infer<typeof Request>;
 
@@ -1206,6 +1276,8 @@ export interface ResponseData {
     hash: string;
     /** Decimal places of the token that was sent. */
     decimals: number;
+    /** True for a Stellar stealth payment: `to` is a one-time address. */
+    private?: boolean;
   };
   'vault.create': { state: VaultState };
   'vault.unlock': { state: VaultState; unlockedUntil: number | null };
@@ -1388,6 +1460,25 @@ export interface ResponseData {
   'tokens.remove': { ok: boolean };
   /** Base-unit balances of every registered token for one address. */
   'tokens.balances': Array<{ id: string; balance: string }>;
+
+  // ── Stellar privacy payments (pXLM stealth) ──────────────────────────────
+  /** The recipient's published stealth meta-address (hex keys), or null. */
+  'stellar.stealth.meta': { spendPub: string; viewPub: string } | null;
+  /** The manage_data broadcast that published the meta-address. */
+  'stellar.stealth.publish': { txHash: string; alreadyPublished: boolean };
+  /**
+   * Stealth payments this wallet can recover: each pairs the announcement
+   * transaction with the one-time address it funded and that balance.
+   */
+  'stellar.stealth.scan': Array<{
+    txHash: string;
+    oneTimeAddress: string;
+    /** Claimable balance in stroops (a decimal string; bigint can't cross the bus). */
+    amountStroops: string;
+    createdAt: string;
+  }>;
+  /** The account-merge sweep that claimed a stealth payment. */
+  'stellar.stealth.claim': { txHash: string };
 }
 
 export function newId(): string {

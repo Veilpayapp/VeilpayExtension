@@ -33,13 +33,31 @@ spending caps you set, and with approval prompts for anything above them.
 | --- | --- |
 | 🔐 **Self-custody** | HD wallet (BIP-32/39), AES-GCM encrypted vault in IndexedDB, auto-lock |
 | ⛓️ **Three chains** | EVM + Solana + Stellar accounts from one seed |
+| 🌐 **Every network** | Mainnets and testnets — Ethereum, Base, Polygon, Arbitrum, Optimism, BNB, Avalanche, Solana, Stellar — plus custom RPCs; the selection persists per chain |
+| 🕵️ **Private payments (pXLM)** | Stellar stealth payments: one-time addresses derived from the recipient's published meta-address, unlinkable on-chain (`src/core/privacy/`) |
+| ➕ **Custom tokens** | Add ERC-20s, SPL mints, and Stellar assets (with trustlines) like any wallet |
+| 🔗 **WalletConnect** | Pair with any WalletConnect dapp from the panel |
 | 🖥️ **Dapp provider** | `window.veilpay`, EIP-1193 `ethereum`, and `solana` providers in pages |
 | 💸 **x402 payments** | HTTP 402 payment challenges intercepted and settled from the wallet |
 | 🤖 **AI agent payments** | MCP server (`mcp/`), hosted relay (`relay/`), OAuth pairing code |
 | 🧢 **Spending caps (VAP)** | Per-origin grants with `maxPerWindow` limits, prompt above threshold |
 | 🔔 **Human approvals** | Every transaction above your threshold opens an approval overlay |
 | 📜 **Audit ledger** | Hash-chained, append-only record of every sensitive operation |
-| 🚰 **Built-in faucet** | Fund all three testnets from the extension |
+| 🚰 **Built-in faucet** | Fund every testnet from the extension |
+
+### Private payments on Stellar
+
+A recipient publishes a **stealth meta-address** (two ed25519 points) on their
+account once — *Receive → Private Payments → Enable*. After that, any Veilpay
+payer can toggle **Private payment** on a Stellar XLM send and the funds land
+on a **fresh one-time address** that only the recipient can unlock:
+
+- The payer's derivation and the announcement ride in the transaction's
+  `MEMO_HASH` (32 bytes).
+- The receiver scans recent announcements with their view key (the Monero
+  model) and claims with an account merge — the whole balance, no dust.
+- Keys are derived from the seed at `m/8888'/0'` and `m/8888'/1'`, so the
+  recovery phrase restores private funds too.
 
 ## Install (anyone can run it)
 

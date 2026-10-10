@@ -156,6 +156,107 @@ describe('transfer memo (Stellar MEMO_TEXT)', () => {
   });
 });
 
+describe('privacy payment flag (Stellar stealth)', () => {
+  it('accepts private: true on a Stellar transfer', () => {
+    const result = TxTransferRequest.safeParse(envelope({
+      chain: 'stellar', index: 0, to: G, amount: '1', private: true,
+    }));
+    expect(result.success).toBe(true);
+  });
+
+  it('keeps the flag optional (normal sends are unaffected)', () => {
+    expect(TxTransferRequest.safeParse(envelope({
+      chain: 'stellar', index: 0, to: G, amount: '1',
+    })).success).toBe(true);
+  });
+
+  it('rejects a non-boolean private flag', () => {
+    expect(TxTransferRequest.safeParse(envelope({
+      chain: 'stellar', index: 0, to: G, amount: '1', private: 'yes',
+    })).success).toBe(false);
+  });
+
+  it('strips the private flag from estimate requests (fee reads never carry it)', () => {
+    const result = TxEstimateRequest.safeParse({
+      ...envelope({
+        chain: 'stellar', index: 0, to: G, amount: '1', private: true,
+      }),
+      kind: 'tx.estimate',
+    });
+    expect(result.success).toBe(true);
+    expect((result.success ? result.data : null)?.payload).not.toHaveProperty('private');
+  });
+});
+
+describe('stellar stealth request schemas', () => {
+  it('meta request requires a valid Stellar G address', async () => {
+    const { StellarStealthMetaRequest } = await import('@/core/messaging/protocol');
+    const base = {
+      id: '00000000-0000-4000-8000-000000000000',
+      source: 'popup',
+      v: 1,
+      kind: 'stellar.stealth.meta',
+    };
+    expect(StellarStealthMetaRequest.safeParse({
+      ...base, payload: { address: G },
+    }).success).toBe(true);
+    expect(StellarStealthMetaRequest.safeParse({
+      ...base, payload: { address: 'not-a-strkey' },
+    }).success).toBe(false);
+    expect(StellarStealthMetaRequest.safeParse({
+      ...base, payload: {},
+    }).success).toBe(false);
+  });
+
+  it('publish and scan take empty payloads', async () => {
+    const { StellarStealthPublishRequest, StellarStealthScanRequest } = await import(
+      '@/core/messaging/protocol'
+    );
+    expect(StellarStealthPublishRequest.safeParse({
+      id: '00000000-0000-4000-8000-000000000000',
+      source: 'popup',
+      v: 1,
+      kind: 'stellar.stealth.publish',
+      payload: {},
+    }).success).toBe(true);
+    expect(StellarStealthScanRequest.safeParse({
+      id: '00000000-0000-4000-8000-000000000000',
+      source: 'popup',
+      v: 1,
+      kind: 'stellar.stealth.scan',
+      payload: {},
+    }).success).toBe(true);
+  });
+
+  it('claim requires the announcement transaction hash', async () => {
+    const { StellarStealthClaimRequest } = await import('@/core/messaging/protocol');
+    const base = {
+      id: '00000000-0000-4000-8000-000000000000',
+      source: 'popup',
+      v: 1,
+      kind: 'stellar.stealth.claim',
+    };
+    expect(StellarStealthClaimRequest.safeParse({
+      ...base, payload: { txHash: 'abc123' },
+    }).success).toBe(true);
+    expect(StellarStealthClaimRequest.safeParse({
+      ...base, payload: {},
+    }).success).toBe(false);
+    expect(StellarStealthClaimRequest.safeParse({
+      ...base, payload: { txHash: '' },
+    }).success).toBe(false);
+  });
+
+  it('marks the privileged stealth kinds so pages can never reach them', async () => {
+    const { isPrivilegedKind } = await import('@/core/messaging/protocol');
+    expect(isPrivilegedKind('stellar.stealth.publish')).toBe(true);
+    expect(isPrivilegedKind('stellar.stealth.scan')).toBe(true);
+    expect(isPrivilegedKind('stellar.stealth.claim')).toBe(true);
+    // meta is a public read, exactly like an address lookup.
+    expect(isPrivilegedKind('stellar.stealth.meta')).toBe(false);
+  });
+});
+
 describe('tx response schema (token fields + error code)', () => {
   it('accepts the new tx.estimate response fields', async () => {
     const { Response } = await import('@/core/messaging/protocol');

@@ -485,6 +485,83 @@ describe('popup unlocked dashboard', () => {
     });
   });
 
+  it('sends a private Stellar payment with private:true on the wire and no memo', async () => {
+    const user = userEvent.setup();
+    const stellar = ACCOUNTS[2]!;
+    // A full-length valid strkey so the recipient meta lookup fires.
+    const recipient = 'G' + 'A'.repeat(55);
+    const oneTimeAddress = 'G' + 'B'.repeat(55);
+    const sent: Array<{ kind: string; payload: Record<string, unknown> }> = [];
+
+    const responder = buildResponder({
+      'vault.status': { state: 'unlocked', unlockedUntil: Date.now() + 60_000 },
+      'zk.capability': null,
+      'account.balance': { chain: 'stellar', address: stellar.address, balance: '100000000' },
+      'stellar.stealth.meta': { spendPub: 'ab'.repeat(32), viewPub: 'cd'.repeat(32) },
+      'tx.estimate': {
+        chain: 'stellar',
+        from: stellar.address,
+        feeNative: '100',
+        gasLimit: '1',
+        decimals: 7,
+        spendableBalance: '100000000',
+        symbol: 'XLM',
+      },
+      'tx.transfer': {
+        chain: 'stellar',
+        from: stellar.address,
+        to: oneTimeAddress,
+        amountNative: '15000000',
+        hash: 'abc123',
+        decimals: 7,
+        private: true,
+      },
+    });
+    vi.mocked(chrome.runtime.sendMessage).mockImplementation((...args: unknown[]) => {
+      const message = (args.length >= 2 ? args[1] : args[0]) as Incoming;
+      if (message.kind === 'tx.transfer') {
+        sent.push(message as { kind: string; payload: Record<string, unknown> });
+      }
+      return responder(message) as never;
+    });
+
+    useWallet.setState({ vaultState: 'unlocked', accounts: [stellar] });
+    render(<App />);
+
+    const [sendButton] = await screen.findAllByRole('button', { name: 'Send' });
+    if (!sendButton) throw new Error('Expected a Send button.');
+    await user.click(sendButton);
+
+    await user.type(screen.getByPlaceholderText('Recipient address'), recipient);
+    await user.type(screen.getByLabelText('Amount (XLM)'), '1.5');
+
+    // Flip the privacy switch on.
+    await user.click(screen.getByRole('switch', { name: 'Private payment' }));
+
+    // The memo input disappears — MEMO_HASH carries the announcement instead.
+    expect(screen.queryByLabelText('Memo')).not.toBeInTheDocument();
+
+    // The recipient lookup resolves and says the recipient accepts privacy.
+    expect(
+      await screen.findByText(/Recipient accepts private payments/),
+    ).toBeInTheDocument();
+
+    await screen.findByText(/Estimated fee: 100 stroops/);
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(await screen.findByText(/Sent!/)).toBeInTheDocument();
+
+    // The private flag must actually be on the wire.
+    const transfer = sent.at(-1);
+    expect(transfer).toBeDefined();
+    expect(transfer?.payload).toMatchObject({
+      chain: 'stellar',
+      amount: '1.5',
+      private: true,
+    });
+    expect(transfer?.payload).not.toHaveProperty('memo');
+  });
+
   it('renders the real balance — never the screenshot placeholder figures', async () => {
     useWallet.setState({ vaultState: 'unlocked', accounts: [ACCOUNTS[2]!] });
     installResponder({

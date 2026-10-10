@@ -341,6 +341,184 @@ describe('Chain Services', () => {
 
       await expect(service.sendTransaction('xdr_base64_string')).rejects.toThrow(/tx_bad_seq/);
     });
+
+    // ── Stealth payment support surface ────────────────────────────────────
+
+    /** Base64 for mock Horizon payloads (jsdom-safe, no Buffer dependency). */
+    function b64(bytes: Uint8Array): string {
+      return btoa(String.fromCharCode(...bytes));
+    }
+
+    it('reads manage_data entries with base64 values decoded', async () => {
+      const service = createStellarService();
+      const entry = new Uint8Array([1, 2, 3, 4]);
+
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          balances: [],
+          sequence: '1',
+          data: {
+            vpstealth: { value: b64(entry) },
+            other: { value: b64(new Uint8Array(8).fill(9)) },
+          },
+        }),
+      });
+
+      const entries = await service.getAccountDataEntries!('GDZST3XVCDTUJ76ZAV2HA72KYQJ5FNJR7G64AAAA');
+      expect(entries['vpstealth']).toEqual(entry);
+      expect(entries['other']).toHaveLength(8);
+    });
+
+    it('returns no data entries for an unfunded account', async () => {
+      const service = createStellarService();
+
+      fetchMock.mockResolvedValueOnce({ ok: false, status: 404 });
+
+      const entries = await service.getAccountDataEntries!('GDZST3XVCDTUJ76ZAV2HA72KYQJ5FNJR7G64AAAA');
+      expect(entries).toEqual({});
+    });
+
+    it('skips malformed data entries instead of failing the read', async () => {
+      const service = createStellarService();
+
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          balances: [],
+          sequence: '1',
+          data: { vpstealth: { value: '%%%not-base64%%%' } },
+        }),
+      });
+
+      const entries = await service.getAccountDataEntries!('GDZST3XVCDTUJ76ZAV2HA72KYQJ5FNJR7G64AAAA');
+      expect(entries['vpstealth']).toBeUndefined();
+    });
+
+    it('lists recent MEMO_HASH transactions with the request excluding failed txs', async () => {
+      const service = createStellarService();
+      const memo = new Uint8Array(32).fill(0xab);
+
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          _embedded: {
+            records: [
+              {
+                hash: 'tx-hash-1',
+                memo_type: 'hash',
+                memo: b64(memo),
+                created_at: '2024-01-01T00:00:00Z',
+              },
+              { hash: 'tx-hash-2', memo_type: 'none' }, // skipped: not a hash memo
+              { hash: 'tx-hash-3', memo_type: 'text', memo: 'hello' }, // skipped
+            ],
+          },
+        }),
+      });
+
+      const result = await service.listRecentHashMemoTransactions!(50);
+      expect(result).toHaveLength(1);
+      expect(result[0]!.txHash).toBe('tx-hash-1');
+      expect(result[0]!.memoBytes).toEqual(memo);
+      expect(result[0]!.createdAt).toBe('2024-01-01T00:00:00Z');
+      // Failed transactions can never carry value: they are excluded so the
+      // scan surface stays clean.
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining('include_failed=false'),
+        expect.anything(),
+      );
+    });
+
+    it('paginates the memo scan across pages using the cursor', async () => {
+      const service = createStellarService();
+      const page1Memo = new Uint8Array(32).fill(0x11);
+      const page2Memo = new Uint8Array(32).fill(0x22);
+
+      // Page 1: one hash-memo tx + a paging token to continue from.
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          _embedded: {
+            records: [
+              {
+                hash: 'tx-newer',
+                memo_type: 'hash',
+                memo: b64(page1Memo),
+                created_at: '2024-01-02T00:00:00Z',
+                paging_token: '1002',
+              },
+              { hash: 'tx-plain', memo_type: 'none', paging_token: '1001' },
+            ],
+          },
+        }),
+      });
+      // Page 2: one more hash-memo tx, then the next page is empty → stop.
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          _embedded: {
+            records: [
+              {
+                hash: 'tx-older',
+                memo_type: 'hash',
+                memo: b64(page2Memo),
+                created_at: '2024-01-01T00:00:00Z',
+                paging_token: '900',
+              },
+            ],
+          },
+        }),
+      });
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ _embedded: { records: [] } }),
+      });
+
+      const result = await service.listRecentHashMemoTransactions!(200, 5);
+      expect(result.map((r) => r.txHash)).toEqual(['tx-newer', 'tx-older']);
+      // The second page request must carry the cursor from page 1.
+      const secondCall = fetchMock.mock.calls[1]![0] as string;
+      expect(secondCall).toContain('cursor=1001');
+    });
+
+    it('reads one transaction memo by hash', async () => {
+      const service = createStellarService();
+      const memo = new Uint8Array(32).fill(0xcd);
+
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          hash: 'tx-hash-1',
+          memo_type: 'hash',
+          memo: b64(memo),
+        }),
+      });
+      expect(await service.getTransactionMemo!('tx-hash-1')).toEqual(memo);
+
+      // A text-memo transaction has no announcement.
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ hash: 'tx-hash-2', memo_type: 'text', memo: 'hi' }),
+      });
+      expect(await service.getTransactionMemo!('tx-hash-2')).toBeNull();
+    });
+
+    it('reads the live base reserve from the latest ledger', async () => {
+      const service = createStellarService();
+
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          _embedded: { records: [{ base_reserve_in_stroops: '5000000' }] },
+        }),
+      });
+      expect(await service.getBaseReserve!()).toBe(5_000_000n);
+
+      // A failed ledger read falls back to the historical constant.
+      fetchMock.mockResolvedValueOnce({ ok: false, status: 500 });
+      expect(await service.getBaseReserve!()).toBe(5_000_000n);
+    });
   });
 
   describe('cross-chain interface', () => {

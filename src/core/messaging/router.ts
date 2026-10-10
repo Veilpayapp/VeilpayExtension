@@ -586,6 +586,30 @@ export async function dispatch(
           ok: true,
           data: await handlers['vap.grant.pending'](request.payload, ctx),
         };
+      case 'stellar.stealth.meta':
+        return {
+          id: request.id,
+          ok: true,
+          data: await handlers['stellar.stealth.meta'](request.payload, ctx),
+        };
+      case 'stellar.stealth.publish':
+        return {
+          id: request.id,
+          ok: true,
+          data: await handlers['stellar.stealth.publish'](request.payload, ctx),
+        };
+      case 'stellar.stealth.scan':
+        return {
+          id: request.id,
+          ok: true,
+          data: await handlers['stellar.stealth.scan'](request.payload, ctx),
+        };
+      case 'stellar.stealth.claim':
+        return {
+          id: request.id,
+          ok: true,
+          data: await handlers['stellar.stealth.claim'](request.payload, ctx),
+        };
       default: {
         const exhaustive: never = request;
         void exhaustive;

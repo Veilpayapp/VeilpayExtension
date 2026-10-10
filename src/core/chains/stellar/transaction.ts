@@ -10,6 +10,7 @@
 import { base32 } from '@scure/base';
 import { ed25519 } from '@noble/curves/ed25519';
 import { sha256 } from '@noble/hashes/sha256';
+import { signWithScalar } from '@/core/chains/stellar/scalar-sign';
 
 /**
  * A Stellar asset to pay in — native XLM or an issued token.
@@ -89,7 +90,8 @@ export interface UnsignedStellarPayment {
  * Format: base32(version byte + payload + CRC16-XModem LE checksum)
  * Version 6 << 3 = 0x30 yields the G... account ID prefix.
  */
-function decodeStellarAddress(address: string): Uint8Array {
+/** Decodes a Stellar strkey (G...) back to its raw 32-byte public key. */
+export function decodeStellarAddress(address: string): Uint8Array {
   // @scure/base's base32 is uppercase-only (RFC 4648); Stellar strkeys are
   // canonical uppercase, so normalize defensively before decoding.
   const normalized = address.toUpperCase();
@@ -168,21 +170,37 @@ function xdrString(bytes: Uint8Array): Uint8Array {
   return concat([xdrUint32(bytes.length), bytes, new Uint8Array(padding)]);
 }
 
+/** A memo in its wire forms: none, text, or a 32-byte hash. */
+export type StellarMemo =
+  | { kind: 'none' }
+  | { kind: 'text'; text: string }
+  | { kind: 'hash'; bytes: Uint8Array };
+
 /**
  * Encodes the Memo union.
  *
  *   union switch (MemoType type) {
  *     case MEMO_NONE: void;          // 0
  *     case MEMO_TEXT: string<28>;    // 1
+ *     case MEMO_HASH: Hash;          // 2  — fixed opaque[32], no length prefix
  *     ...
  *   }
  *
- * Empty/whitespace-only input collapses to MEMO_NONE so a blank memo field
- * never changes the transaction. Input over 28 UTF-8 bytes throws: memos are
+ * Empty/whitespace-only text collapses to MEMO_NONE so a blank memo field
+ * never changes the transaction. Text over 28 UTF-8 bytes throws: memos are
  * load-bearing for exchanges, so truncating silently is worse than failing.
+ * A hash memo must be exactly 32 bytes (it carries e.g. a stealth ephemeral
+ * public key).
  */
-function xdrMemo(memo: string | undefined): Uint8Array {
-  const text = memo?.trim() ?? '';
+function xdrMemoInput(memo: StellarMemo): Uint8Array {
+  if (memo.kind === 'none') return xdrUint32(0);
+  if (memo.kind === 'hash') {
+    if (memo.bytes.length !== 32) {
+      throw new Error(`MEMO_HASH must be exactly 32 bytes, got ${memo.bytes.length}.`);
+    }
+    return concat([xdrUint32(2), memo.bytes]); // MEMO_HASH
+  }
+  const text = memo.text.trim();
   if (text.length === 0) return xdrUint32(0); // MEMO_NONE
   const bytes = new TextEncoder().encode(text);
   if (bytes.length > 28) {
@@ -303,13 +321,14 @@ function xdrPaymentOperation(
 
 /**
  * Encodes a Transaction XDR struct for an arbitrary list of prebuilt
- * operations (shared by the payment and change-trust builders).
+ * operations (shared by the payment, change-trust, create-account, and
+ * manage-data builders).
  */
 function xdrTransactionOps(
   sourcePubkey: Uint8Array,
   fee: number,
   seqNum: bigint,
-  memo: string | undefined,
+  memo: StellarMemo,
   operations: Uint8Array[],
 ): Uint8Array {
   // sourceAccount: AccountID = PUBLIC_KEY_TYPE_ED25519 + 32 bytes
@@ -320,8 +339,8 @@ function xdrTransactionOps(
   const seqNumXdr = xdrUint64(seqNum);
   // preconditions: modern `Preconditions` union, PRECOND_NONE (no constraints).
   const preconditions = xdrPreconditionsNone();
-  // memo: MEMO_NONE or MEMO_TEXT
-  const memoXdr = xdrMemo(memo);
+  // memo: none, text, or hash
+  const memoXdr = xdrMemoInput(memo);
   // ext: v=0
   const ext = xdrUint32(0);
 
@@ -345,11 +364,71 @@ function xdrTransactionOps(
  *     int64 limit;   // max units to hold; INT64_MAX means "no limit"
  *   }
  *   Operation { sourceAccount=null, body = union { case CHANGE_TRUST: ... } }
- *   OperationType: CHANGE_TRUST = 7.
+ *   OperationType: CHANGE_TRUST = 6.
  */
 function xdrChangeTrustOperation(asset: StellarAssetXdr, limit: bigint): Uint8Array {
   const nullSourcePointer = xdrUint32(0); // MuxedAccount* = null
-  const body = concat([xdrUint32(7), xdrAsset(asset), xdrInt64(limit)]); // CHANGE_TRUST = 7
+  const body = concat([xdrUint32(6), xdrAsset(asset), xdrInt64(limit)]); // CHANGE_TRUST = 6
+  return concat([nullSourcePointer, body]);
+}
+
+/**
+ * Encodes a CREATE_ACCOUNT operation.
+ *
+ * XDR:
+ *   struct CreateAccountOp {
+ *     AccountID destination;  // the new account's public key
+ *     int64 startingBalance;  // XLM it starts with (>= base reserve)
+ *   }
+ *   OperationType: CREATE_ACCOUNT = 0.
+ */
+function xdrCreateAccountOperation(destPubkey: Uint8Array, startingBalance: bigint): Uint8Array {
+  const nullSourcePointer = xdrUint32(0); // MuxedAccount* = null
+  const body = concat([xdrUint32(0), xdrPublicKey(destPubkey), xdrInt64(startingBalance)]);
+  return concat([nullSourcePointer, body]);
+}
+
+/**
+ * Encodes a MANAGE_DATA operation (set a name/value pair on the source
+ * account; a null value deletes the entry).
+ *
+ * XDR:
+ *   struct ManageDataOp {
+ *     string64 dataName;
+ *     DataValue* dataValue;   // pointer: uint32 0 (null) or 1 + opaque<64>
+ *   }
+ *   OperationType: MANAGE_DATA = 10.
+ */
+function xdrManageDataOperation(name: string, value: Uint8Array | null): Uint8Array {
+  const nameBytes = new TextEncoder().encode(name);
+  if (nameBytes.length > 64) {
+    throw new Error(`manage_data name is ${nameBytes.length} bytes; the maximum is 64.`);
+  }
+  if (value !== null && value.length > 64) {
+    throw new Error(`manage_data value is ${value.length} bytes; the maximum is 64.`);
+  }
+  const nullSourcePointer = xdrUint32(0); // MuxedAccount* = null
+  const valueXdr = value === null ? xdrUint32(0) : concat([xdrUint32(1), xdrOpaque(value)]);
+  const body = concat([xdrUint32(10), xdrString(nameBytes), valueXdr]); // MANAGE_DATA = 10
+  return concat([nullSourcePointer, body]);
+}
+
+/**
+ * Encodes an ACCOUNT_MERGE operation — sweeps the SOURCE account's entire
+ * balance (including its base reserve) into the destination and deletes the
+ * source account. Used by the privacy layer to claim stealth one-time
+ * accounts cleanly, leaving no dust behind.
+ *
+ * XDR:
+ *   union switch (OperationType type) {
+ *     case ACCOUNT_MERGE: AccountID destination;   // = 8
+ *   }
+ * The source account is the transaction's source account, so the operation
+ * body is only the destination public key.
+ */
+function xdrAccountMergeOperation(destPubkey: Uint8Array): Uint8Array {
+  const nullSourcePointer = xdrUint32(0); // MuxedAccount* = null
+  const body = concat([xdrUint32(8), xdrPublicKey(destPubkey)]); // ACCOUNT_MERGE = 8
   return concat([nullSourcePointer, body]);
 }
 
@@ -359,23 +438,20 @@ function xdrChangeTrustOperation(asset: StellarAssetXdr, limit: bigint): Uint8Ar
 
 /**
  * Shared build-sign-serialize core: produces a signed TransactionEnvelope
- * for a set of operations from one source account.
+ * for a set of operations from one source account. `sign` computes the
+ * 64-byte Ed25519 signature over the network transaction hash; the
+ * seed-based wrapper below is the default, and the privacy layer supplies
+ * the raw-scalar variant for one-time keys.
  */
-function signStellarEnvelope(
+function signStellarEnvelopeWithSigner(
   from: string,
   fee: number,
   sequence: bigint,
-  memo: string | undefined,
+  memo: StellarMemo,
   operations: Uint8Array[],
   networkPassphrase: string | undefined,
-  privateKey: Uint8Array,
+  sign: (txHash: Uint8Array) => Uint8Array,
 ): SignedStellarTransaction {
-  if (privateKey.length !== 32) {
-    throw new Error(
-      `Stellar private key must be 32 bytes, got ${privateKey.length}.`,
-    );
-  }
-
   const sourcePubkey = decodeStellarAddress(from);
 
   // Stellar requires a transaction's seqNum to be the account's CURRENT
@@ -394,7 +470,7 @@ function signStellarEnvelope(
   const txHash = sha256(stellarSignatureBase(networkId, txXdr));
 
   // Sign the hash
-  const signature = ed25519.sign(txHash, privateKey);
+  const signature = sign(txHash);
 
   // Build the DecoratedSignature:
   // hint = last 4 bytes of the public key
@@ -417,6 +493,35 @@ function signStellarEnvelope(
 }
 
 /**
+ * Builds, signs, and serializes a TransactionEnvelope (seed-key signing:
+ * `privateKey` is a standard ed25519 seed whose public key must equal `from`).
+ */
+function signStellarEnvelope(
+  from: string,
+  fee: number,
+  sequence: bigint,
+  memo: StellarMemo,
+  operations: Uint8Array[],
+  networkPassphrase: string | undefined,
+  privateKey: Uint8Array,
+): SignedStellarTransaction {
+  if (privateKey.length !== 32) {
+    throw new Error(
+      `Stellar private key must be 32 bytes, got ${privateKey.length}.`,
+    );
+  }
+  return signStellarEnvelopeWithSigner(
+    from,
+    fee,
+    sequence,
+    memo,
+    operations,
+    networkPassphrase,
+    (txHash) => ed25519.sign(txHash, privateKey),
+  );
+}
+
+/**
  * Builds, signs, and serializes a Stellar payment transaction.
  *
  * Defaults to a native XLM payment; pass `tx.asset` with `type: 'issued'` to
@@ -436,7 +541,9 @@ export function signStellarPayment(
     tx.from,
     tx.fee,
     tx.sequence,
-    tx.memo,
+    tx.memo === undefined || tx.memo.trim().length === 0
+      ? { kind: 'none' }
+      : { kind: 'text', text: tx.memo },
     [xdrPaymentOperation(destPubkey, tx.amount, asset)],
     tx.networkPassphrase,
     privateKey,
@@ -481,10 +588,151 @@ export function signStellarChangeTrust(
     tx.from,
     tx.fee,
     tx.sequence,
-    undefined,
+    { kind: 'none' },
     [xdrChangeTrustOperation(tx.asset, tx.limit)],
     tx.networkPassphrase,
     privateKey,
+  );
+}
+
+/** An unsigned Stellar create-account transaction. */
+export interface UnsignedStellarCreateAccount {
+  /** Sender (and fee payer) — the funded source account. */
+  from: string;
+  /** The new account's public key (as a G... strkey). */
+  to: string;
+  /** Starting balance in stroops; must be ≥ the network base reserve. */
+  startingBalance: bigint;
+  /** Source account sequence from Horizon. */
+  sequence: bigint;
+  /** Base fee in stroops. */
+  fee: number;
+  /**
+   * Optional 32-byte hash memo. The privacy send path carries the stealth
+   * ephemeral public key here — exactly 32 bytes, exactly what MEMO_HASH is.
+   */
+  memoHash?: Uint8Array;
+  /** Network passphrase. Defaults to the Stellar testnet passphrase. */
+  networkPassphrase?: string;
+}
+
+/**
+ * Builds, signs, and serializes a CREATE_ACCOUNT transaction — used both to
+ * fund ordinary accounts and to pay a stealth one-time address (which is, by
+ * construction, never previously funded).
+ */
+export function signStellarCreateAccount(
+  tx: UnsignedStellarCreateAccount,
+  privateKey: Uint8Array,
+): SignedStellarTransaction {
+  const destPubkey = decodeStellarAddress(tx.to);
+  return signStellarEnvelope(
+    tx.from,
+    tx.fee,
+    tx.sequence,
+    tx.memoHash === undefined ? { kind: 'none' } : { kind: 'hash', bytes: tx.memoHash },
+    [xdrCreateAccountOperation(destPubkey, tx.startingBalance)],
+    tx.networkPassphrase,
+    privateKey,
+  );
+}
+
+/** An unsigned Stellar manage-data transaction. */
+export interface UnsignedStellarManageData {
+  /** The account the data entry is written to (also the fee payer). */
+  from: string;
+  /** Data name (≤ 64 bytes). */
+  name: string;
+  /** Data value (≤ 64 bytes); null deletes the entry. */
+  value: Uint8Array | null;
+  /** Source account sequence from Horizon. */
+  sequence: bigint;
+  /** Base fee in stroops. */
+  fee: number;
+  /** Network passphrase. Defaults to the Stellar testnet passphrase. */
+  networkPassphrase?: string;
+}
+
+/**
+ * Builds, signs, and serializes a MANAGE_DATA transaction — used to publish
+ * the account's stealth meta-address (spendPub || viewPub, 64 bytes) so any
+ * Veilpay payer can derive private one-time addresses for it.
+ */
+export function signStellarManageData(
+  tx: UnsignedStellarManageData,
+  privateKey: Uint8Array,
+): SignedStellarTransaction {
+  return signStellarEnvelope(
+    tx.from,
+    tx.fee,
+    tx.sequence,
+    { kind: 'none' },
+    [xdrManageDataOperation(tx.name, tx.value)],
+    tx.networkPassphrase,
+    privateKey,
+  );
+}
+
+/** An unsigned Stellar account-merge (sweep) transaction. */
+export interface UnsignedStellarAccountMerge {
+  /**
+   * The account being merged away — the transaction source and fee payer.
+   * In the privacy flow this is a stealth one-time address.
+   */
+  from: string;
+  /** The beneficiary who receives the swept balance. */
+  to: string;
+  /** The source account's current sequence from Horizon. */
+  sequence: bigint;
+  /** Base fee in stroops, paid from the swept balance. */
+  fee: number;
+  /** Network passphrase. Defaults to the Stellar testnet passphrase. */
+  networkPassphrase?: string;
+}
+
+/**
+ * Builds, signs, and serializes an ACCOUNT_MERGE transaction — sweeps the
+ * source account's ENTIRE balance (including its base reserve) into the
+ * destination and deletes the source. Used to claim stealth one-time
+ * accounts without leaving an unclaimable dust address behind.
+ */
+export function signStellarAccountMerge(
+  tx: UnsignedStellarAccountMerge,
+  privateKey: Uint8Array,
+): SignedStellarTransaction {
+  const destPubkey = decodeStellarAddress(tx.to);
+  return signStellarEnvelope(
+    tx.from,
+    tx.fee,
+    tx.sequence,
+    { kind: 'none' },
+    [xdrAccountMergeOperation(destPubkey)],
+    tx.networkPassphrase,
+    privateKey,
+  );
+}
+
+/**
+ * Raw-scalar variant of {@link signStellarAccountMerge} — signs with a
+ * stealth one-time key, which is an additive derivation with NO seed, so
+ * ed25519.sign (seed model) cannot sign for it. The signature is a standard
+ * Ed25519 signature over the explicit scalar (see privacy/stellar-stealth's
+ * signWithScalar); it verifies against the one-time address exactly like a
+ * seed-derived key's signature would.
+ */
+export function signStellarAccountMergeWithScalar(
+  tx: UnsignedStellarAccountMerge,
+  oneTimeScalar: Uint8Array,
+): SignedStellarTransaction {
+  const destPubkey = decodeStellarAddress(tx.to);
+  return signStellarEnvelopeWithSigner(
+    tx.from,
+    tx.fee,
+    tx.sequence,
+    { kind: 'none' },
+    [xdrAccountMergeOperation(destPubkey)],
+    tx.networkPassphrase,
+    (txHash) => signWithScalar(txHash, oneTimeScalar),
   );
 }
 

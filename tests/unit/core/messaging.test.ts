@@ -141,6 +141,10 @@ function handlers(overrides: Partial<HandlerMap> = {}): HandlerMap {
     }),
     'tokens.remove': async () => ({ ok: true }),
     'tokens.balances': async () => [],
+    'stellar.stealth.meta': async () => null,
+    'stellar.stealth.publish': async () => ({ txHash: 'hash', alreadyPublished: false }),
+    'stellar.stealth.scan': async () => [],
+    'stellar.stealth.claim': async () => ({ txHash: 'hash' }),
     'vault.create': async () => ({ state: 'unlocked' as const }),
     'vault.unlock': async () => ({ state: 'unlocked' as const, unlockedUntil: 1_000 }),
     'vault.reset': async () => ({ state: 'uninitialized' as const }),
@@ -627,6 +631,62 @@ describe('privileged kind enforcement', () => {
     expect(response.ok).toBe(false);
     if (!response.ok) expect(response.error.code).toBe('ORIGIN_DENIED');
     expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it('denies stellar.stealth.claim from a compromised content script', async () => {
+    // Claiming derives stealth keys from the vault and broadcasts a sweep —
+    // exactly the class of privileged mutation a page must not drive.
+    const claim = vi.fn();
+    const response = await dispatch(
+      {
+        id: newId(),
+        v: 1,
+        source: 'content',
+        kind: 'stellar.stealth.claim',
+        payload: { txHash: 'announcement-hash' },
+      },
+      pageSender,
+      handlers({ 'stellar.stealth.claim': claim as unknown as HandlerMap['stellar.stealth.claim'] })
+    );
+
+    expect(response.ok).toBe(false);
+    if (!response.ok) expect(response.error.code).toBe('ORIGIN_DENIED');
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  it('denies stellar.stealth.scan from a compromised content script', async () => {
+    // Scanning derives the wallet's view/spend keys — key derivation is
+    // privileged even when the response itself is public-shaped.
+    const scan = vi.fn();
+    const response = await dispatch(
+      { id: newId(), v: 1, source: 'content', kind: 'stellar.stealth.scan', payload: {} },
+      pageSender,
+      handlers({ 'stellar.stealth.scan': scan as unknown as HandlerMap['stellar.stealth.scan'] })
+    );
+
+    expect(response.ok).toBe(false);
+    if (!response.ok) expect(response.error.code).toBe('ORIGIN_DENIED');
+    expect(scan).not.toHaveBeenCalled();
+  });
+
+  it('allows the public stealth meta read from a content script', async () => {
+    // Reading a recipient's published meta-address is exactly as public as
+    // reading an address — no vault access, no broadcast.
+    const meta = vi.fn(async () => null);
+    const response = await dispatch(
+      {
+        id: newId(),
+        v: 1,
+        source: 'content',
+        kind: 'stellar.stealth.meta',
+        payload: { address: 'G' + 'A'.repeat(55) },
+      },
+      pageSender,
+      handlers({ 'stellar.stealth.meta': meta as unknown as HandlerMap['stellar.stealth.meta'] })
+    );
+
+    expect(response.ok).toBe(true);
+    expect(meta).toHaveBeenCalled();
   });
 });
 
