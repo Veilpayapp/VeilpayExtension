@@ -79,10 +79,13 @@ pool** and spend it as private notes.
   signature, so the recovery phrase restores private notes too.
 
 The pool lives on Stellar **testnet** (the wallet refuses pool operations on
-other networks). The e2e proof — `npm run build && node
-scripts/spp-smoke/extension-e2e.mjs` — creates a wallet, funds it, registers
-it, and drives shield → private transfer → unshield against the live
-contracts.
+other networks). Two e2e proofs: `npm run build && node
+scripts/spp-smoke/extension-e2e.mjs` creates a wallet, funds it, registers
+it, and drives shield → private transfer (to itself **and** to a second
+registered wallet) → unshield through the real extension path; `node
+scripts/spp-smoke/twowallet-drive.mjs` proves the recipient side — two fresh
+wallets, one private transfer, and the recipient's pool balance and unspent
+notes show exactly the amount sent.
 
 ## Install (anyone can run it)
 

@@ -8,7 +8,13 @@
  *
  * Drives chrome.runtime messages from the extension's own popup page (loaded
  * in a tab so CDP can evaluate inside the extension origin), which is exactly
- * what the UI does. Usage:
+ * what the UI does. The scenario: create a fresh wallet, fund it, register
+ * its pool keys, shield XLM, send a private transfer to SELF, send a private
+ * transfer to a SECOND registered wallet (the cross-wallet path — recipient
+ * keys resolved from the on-chain registry), and unshield — with balance
+ * conservation asserted at every step.
+ *
+ * Usage:
  *
  *   npm run build && node scripts/spp-smoke/extension-e2e.mjs
  */
@@ -25,8 +31,17 @@ const CDP_PORT = 9334;
 const PASSPHRASE = 'veilpay e2e pass phrase 2444';
 
 const DEPOSIT_STROOPS = 200_000_000n; // 20 XLM
-const TRANSFER_STROOPS = 50_000_000n; // 5 XLM
+const TRANSFER_STROOPS = 50_000_000n; // 5 XLM (private self-send)
 const WITHDRAW_STROOPS = 25_000_000n; // 2.5 XLM
+
+// A second, SEPARATELY-registered wallet: the deterministic SDK smoke wallet
+// (registered on-chain since ledger 5167546). Sending to it exercises the
+// true cross-wallet path — the sender resolves the recipient's keys from the
+// on-chain registry and encrypts the notes to them — which a self-send never
+// touches. Receipt on that wallet's side is proven separately by
+// twowallet-drive.mjs.
+const OTHER_WALLET = 'GANBEFMT4SCGBG2OPD6MXKRAN6GNZ7ZXY5XEZ7LGLW6OPBG7VXIDNYPS';
+const CROSS_TRANSFER_STROOPS = 10_000_000n; // 1 XLM
 
 function sendExpression(kind, payload) {
   const safePayload = JSON.stringify(payload).replace(/'/g, "\\'");
@@ -182,9 +197,23 @@ async function main() {
     });
 
     // Measure the private balance right after the transfer (before the
-    // withdraw changes it), so conservation is asserted at the right point.
+    // cross-wallet send and withdraw change it), so conservation is asserted
+    // at the right point.
     const sppMid = await request('spp.status #2b (after transfer)', 'spp.status', {});
     const balanceMid = BigInt(sppMid?.data?.balanceStroops ?? '0');
+
+    // The cross-wallet leg: a private send to a DIFFERENT wallet whose keys
+    // the sender can only learn from the on-chain registry.
+    const cross = await request(
+      'spp.transfer (cross-wallet, second registered wallet)',
+      'spp.transfer',
+      {
+        to: OTHER_WALLET,
+        amountStroops: CROSS_TRANSFER_STROOPS.toString(),
+      },
+    );
+    const sppCross = await request('spp.status #2c (after cross-wallet transfer)', 'spp.status', {});
+    const balanceCross = BigInt(sppCross?.data?.balanceStroops ?? '0');
 
     const withdraw = await request('spp.withdraw (unshield)', 'spp.withdraw', {
       amountStroops: WITHDRAW_STROOPS.toString(),
@@ -214,10 +243,18 @@ async function main() {
       balanceMid === balance2,
       `private transfer conserved value (${balance2} → ${balanceMid})`,
     );
+    expect(
+      cross?.data?.txHash?.length > 0,
+      'cross-wallet transfer produced a transaction hash',
+    );
+    expect(
+      balanceCross === balance2 - CROSS_TRANSFER_STROOPS,
+      `cross-wallet transfer left the sender exactly the amount poorer (${balance2} → ${balanceCross})`,
+    );
     expect(withdraw?.data?.txHash?.length > 0, 'withdraw produced a transaction hash');
     expect(
-      balance3 === balance1 + DEPOSIT_STROOPS - WITHDRAW_STROOPS,
-      `final private balance = deposit − withdraw (${balance3})`,
+      balance3 === balance1 + DEPOSIT_STROOPS - WITHDRAW_STROOPS - CROSS_TRANSFER_STROOPS,
+      `final private balance = deposit − withdraw − cross transfer (${balance3})`,
     );
     // Soroban resource fees for three pool transactions are several XLM; the
     // exact figure varies with footprint, so the public-balance assertions

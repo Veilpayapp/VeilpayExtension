@@ -90,11 +90,15 @@ never bundled — because the SDK derives its worker and WASM URLs from its own
 module location. `scripts/check-bundle-size.mjs` excludes them from the code
 budget (they are data, not code).
 
-**Verification**: `scripts/spp-smoke/` drives the full flow twice —
+**Verification**: `scripts/spp-smoke/` drives the flow at three levels —
 `drive.mjs` runs the SDK directly in a page (deposit → private transfer →
-withdraw with exact balance conservation), and `extension-e2e.mjs` drives the
-real extension path end-to-end (vault → background handlers → offscreen
-runtime → vault-backed signer → proofs → testnet contracts).
+withdraw with exact balance conservation), `twowallet-drive.mjs` proves the
+cross-wallet path (two fresh wallets: the sender's private transfer lands as
+spendable notes under the recipient's — different — keys, resolved through
+the on-chain registry), and `extension-e2e.mjs` drives the real extension
+path end-to-end (vault → background handlers → offscreen runtime →
+vault-backed signer → proofs → testnet contracts), including a private send
+to a second registered wallet.
 
 ## Request/Response Flows
 
