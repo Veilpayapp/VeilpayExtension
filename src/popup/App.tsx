@@ -19,6 +19,7 @@ import { TransactionReceiptView } from '@/ui/components/TransactionReceiptView';
 import { ScanModal, type ParsedRecipient } from '@/ui/components/ScanModal';
 import { AddressBookPicker } from '@/ui/components/AddressBookPicker';
 import { CameraSetupCard } from '@/ui/components/CameraSetupCard';
+import { PrivacyView } from '@/ui/components/PrivacyView';
 import { baseToDecimal, nativeDecimalsFor } from '@/ui/lib/format';
 import { networkFor, networkLabel } from '@/ui/components/Dashboard';
 import { vaultExists } from '@/core/vault/storage';
@@ -139,8 +140,8 @@ export default function App() {
   const [unlockAttempt, setUnlockAttempt] = useState(0);
   const [resetConfirm, setResetConfirm] = useState(false);
 
-  // Send / receive / import view
-  const [view, setView] = useState<'accounts' | 'send' | 'receive' | 'import'>('accounts');
+  // Send / receive / import / privacy view
+  const [view, setView] = useState<'accounts' | 'send' | 'receive' | 'import' | 'privacy'>('accounts');
   const [sendTo, setSendTo] = useState('');
   const [sendAmount, setSendAmount] = useState('');
   /** Stellar MEMO_TEXT, sent with the transfer. Lifted here so a scanned
@@ -731,6 +732,9 @@ export default function App() {
         />
       );
     }
+    if (view === 'privacy') {
+      return <PrivacyView onBack={() => setView('accounts')} />;
+    }
 
     // Default: Dashboard matching Screenshot 1 & 2
     return (
@@ -793,6 +797,7 @@ export default function App() {
             onScan={() => setScanModalOpen(true)}
             onSelectTx={(tx) => setSelectedTx(tx)}
             onSeeAllActivity={() => void chrome.runtime.openOptionsPage()}
+            onPrivacy={() => setView('privacy')}
           />
 
           <ZkResult capability={zkCapability} />

@@ -145,6 +145,19 @@ function handlers(overrides: Partial<HandlerMap> = {}): HandlerMap {
     'stellar.stealth.publish': async () => ({ txHash: 'hash', alreadyPublished: false }),
     'stellar.stealth.scan': async () => [],
     'stellar.stealth.claim': async () => ({ txHash: 'hash' }),
+    'spp.status': async () => ({
+      poolContractId: 'CPOOL',
+      assetSymbol: 'pXLM',
+      balanceStroops: '0',
+      registered: false,
+      bootnodeRequired: false,
+      syncedLedger: 0,
+      readAt: 0,
+    }),
+    'spp.register': async () => ({ txHash: 'hash' }),
+    'spp.deposit': async () => ({ txHash: 'hash', amountStroops: '0' }),
+    'spp.transfer': async () => ({ txHash: 'hash', amountStroops: '0' }),
+    'spp.withdraw': async () => ({ txHash: 'hash', amountStroops: '0' }),
     'vault.create': async () => ({ state: 'unlocked' as const }),
     'vault.unlock': async () => ({ state: 'unlocked' as const, unlockedUntil: 1_000 }),
     'vault.reset': async () => ({ state: 'uninitialized' as const }),
@@ -667,6 +680,56 @@ describe('privileged kind enforcement', () => {
     expect(response.ok).toBe(false);
     if (!response.ok) expect(response.error.code).toBe('ORIGIN_DENIED');
     expect(scan).not.toHaveBeenCalled();
+  });
+
+  it.each(['spp.status', 'spp.deposit', 'spp.transfer', 'spp.withdraw', 'spp.register'] as const)(
+    'denies %s from a compromised content script',
+    async (kind) => {
+      // Every SPP kind derives pool privacy keys from the vault signature or
+      // moves funds through the pool — a page must never drive them.
+      const handler = vi.fn();
+      const response = await dispatch(
+        {
+          id: newId(),
+          v: 1,
+          source: 'content',
+          kind,
+          payload:
+            kind === 'spp.transfer'
+              ? { to: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF', amountStroops: '1' }
+              : kind === 'spp.deposit' || kind === 'spp.withdraw'
+                ? { amountStroops: '1' }
+                : {},
+        },
+        pageSender,
+        handlers({ [kind]: handler } as Partial<HandlerMap>)
+      );
+
+      expect(response.ok).toBe(false);
+      if (!response.ok) expect(response.error.code).toBe('ORIGIN_DENIED');
+      expect(handler).not.toHaveBeenCalled();
+    },
+  );
+
+  it('serves spp.status to an extension surface', async () => {
+    // The wallet's own UI must be able to read the private pool state.
+    const status = vi.fn(async () => ({
+      poolContractId: 'CPOOL',
+      assetSymbol: 'pXLM',
+      balanceStroops: '0',
+      registered: false,
+      bootnodeRequired: false,
+      syncedLedger: 0,
+      readAt: 0,
+    }));
+    const response = await dispatch(
+      { id: newId(), v: 1, source: 'popup', kind: 'spp.status', payload: {} },
+      uiSender,
+      handlers({ 'spp.status': status as unknown as HandlerMap['spp.status'] })
+    );
+
+    expect(response.ok).toBe(true);
+    expect(status).toHaveBeenCalledTimes(1);
   });
 
   it('allows the public stealth meta read from a content script', async () => {

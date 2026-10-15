@@ -55,6 +55,47 @@ Veilpay is a privacy-preserving payment extension built on zero-knowledge proofs
 
 **Why**: Allows extension to prove knowledge of transaction without revealing private key to untrusted page.
 
+### Stellar Private Payments / privacy pool (`src/core/spp/`)
+
+**What**: The pXLM privacy pool — shield public XLM into private notes
+(UTXO-style commitments), transfer privately by `G…` address, unshield on
+demand. Groth16 proofs over BN254 prove note ownership and Merkle membership
+on-chain; the public ledger never learns sender, recipient, or amount.
+
+**Layout**:
+- `deployment.ts` — the pinned testnet deployment (pool, registry, ASP, and
+  verifier contract ids) the wallet talks to. Identifiers are compile-time
+  constants: a compromised network response cannot redirect pool operations.
+- `host.ts` — the offscreen runtime host. The vendored SPP web SDK
+  (`third_party/spp-sdk`, built from source) needs OPFS, Workers, and WASM,
+  none of which exist in the MV3 service worker, so it runs in the offscreen
+  document and is driven over the internal control plane (`spp:exec`).
+- `bridge.ts` — the background-side bridge: creates the offscreen document on
+  demand, forwards ops, and closes it after an idle period.
+- `internal-protocol.ts` — the control-plane message shapes plus the signing
+  callback protocol (`spp:sign`) that keeps vault keys in the service worker.
+
+**Key handling**: the SDK's three signing callbacks (`signMessage`,
+`signAuthEntry`, `signTransaction` — see
+`src/core/chains/stellar/soroban-sign.ts`) round-trip to the background,
+where they are answered inside `vault.withAccount`. The private key never
+exists outside the service worker; the offscreen document only ever sees
+public XDR. Pool privacy keys are derived from the wallet's own signature
+over an SDK-issued derivation message, so the recovery phrase restores
+private notes.
+
+**Assets**: the SDK runtime and circuit artifacts ship as static files under
+`dist/spp/` (staged by `scripts/copy-spp-assets.mjs`), imported by URL —
+never bundled — because the SDK derives its worker and WASM URLs from its own
+module location. `scripts/check-bundle-size.mjs` excludes them from the code
+budget (they are data, not code).
+
+**Verification**: `scripts/spp-smoke/` drives the full flow twice —
+`drive.mjs` runs the SDK directly in a page (deposit → private transfer →
+withdraw with exact balance conservation), and `extension-e2e.mjs` drives the
+real extension path end-to-end (vault → background handlers → offscreen
+runtime → vault-backed signer → proofs → testnet contracts).
+
 ## Request/Response Flows
 
 ### Vault Lock/Unlock

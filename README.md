@@ -34,7 +34,8 @@ spending caps you set, and with approval prompts for anything above them.
 | 🔐 **Self-custody** | HD wallet (BIP-32/39), AES-GCM encrypted vault in IndexedDB, auto-lock |
 | ⛓️ **Three chains** | EVM + Solana + Stellar accounts from one seed |
 | 🌐 **Every network** | Mainnets and testnets — Ethereum, Base, Polygon, Arbitrum, Optimism, BNB, Avalanche, Solana, Stellar — plus custom RPCs; the selection persists per chain |
-| 🕵️ **Private payments (pXLM)** | Stellar stealth payments: one-time addresses derived from the recipient's published meta-address, unlinkable on-chain (`src/core/privacy/`) |
+| 🕵️ **Stealth payments** | Stellar stealth sends: one-time addresses derived from the recipient's published meta-address, unlinkable on-chain (`src/core/privacy/`) |
+| 🏊 **Privacy pool (pXLM)** | Shield XLM into a Soroban privacy pool, transfer privately by G… address, unshield on demand — Groth16 proofs, UTXO-style notes (`src/core/spp/`) |
 | ➕ **Custom tokens** | Add ERC-20s, SPL mints, and Stellar assets (with trustlines) like any wallet |
 | 🔗 **WalletConnect** | Pair with any WalletConnect dapp from the panel |
 | 🖥️ **Dapp provider** | `window.veilpay`, EIP-1193 `ethereum`, and `solana` providers in pages |
@@ -45,7 +46,7 @@ spending caps you set, and with approval prompts for anything above them.
 | 📜 **Audit ledger** | Hash-chained, append-only record of every sensitive operation |
 | 🚰 **Built-in faucet** | Fund every testnet from the extension |
 
-### Private payments on Stellar
+### Stealth payments on Stellar
 
 A recipient publishes a **stealth meta-address** (two ed25519 points) on their
 account once — *Receive → Private Payments → Enable*. After that, any Veilpay
@@ -58,6 +59,30 @@ on a **fresh one-time address** that only the recipient can unlock:
   model) and claims with an account merge — the whole balance, no dust.
 - Keys are derived from the seed at `m/8888'/0'` and `m/8888'/1'`, so the
   recovery phrase restores private funds too.
+
+### Privacy pool (pXLM)
+
+A second, stronger privacy tier: shield public XLM into a Soroban **privacy
+pool** and spend it as private notes.
+
+- **Shield** public XLM into pXLM notes — UTXO-style commitments in an
+  on-chain Merkle tree that only you can read or spend.
+- **Transfer** pXLM to any registered `G…` address: the public ledger records
+  only that the pool was used, not who paid whom or how much.
+- **Unshield** pXLM back into the wallet's public XLM balance any time.
+- Every spend carries a Groth16 zero-knowledge proof; nullifiers prevent
+  double-spends. Proving runs in the extension's offscreen document, and the
+  private keys never leave the service worker — the prover asks the vault to
+  sign each operation.
+- Built on the Nethermind "Stellar Private Payments" reference contracts
+  (our own testnet deployment); pool keys are derived from the wallet's own
+  signature, so the recovery phrase restores private notes too.
+
+The pool lives on Stellar **testnet** (the wallet refuses pool operations on
+other networks). The e2e proof — `npm run build && node
+scripts/spp-smoke/extension-e2e.mjs` — creates a wallet, funds it, registers
+it, and drives shield → private transfer → unshield against the live
+contracts.
 
 ## Install (anyone can run it)
 

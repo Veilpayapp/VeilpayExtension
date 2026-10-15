@@ -1,0 +1,31 @@
+Circuits - Licensing Notice
+
+This directory contains compiled circuit artifacts (`*.r1cs` and `*.graph.bin`)
+that were generated from Circom sources in the repository
+
+https://github.com/NethermindEth/stellar-private-payments
+
+and that incorporate templates from `iden3/circomlib`, which is licensed
+under the GNU Lesser General Public License, version 3 (LGPL-3.0).
+
+As a result, distribution of these compiled artifacts must comply with LGPL-3.0
+requirements applicable to a Combined Work (see LGPL-3.0 §4).
+
+Licenses:
+- Apache-2.0: see `../LICENSE.txt` (covers this project's sources/assets in the distribution)
+- LGPL-3.0: see `../licenses/LGPL-3.0.txt`
+- GPL-3.0: see `../licenses/GPL-3.0.txt` (LGPL-3.0 requires a copy of GPL-3.0 as well)
+
+Build provenance:
+- The repository commit: unknown
+- Build date (UTC): 2026-10-13T05:00:18Z
+- circomlib revision: 35e54ea21da3e8762557234298dbb553c175ea8d
+
+Corresponding Source / rebuild:
+To satisfy LGPL-3.0 "Corresponding Source" expectations for these artifacts, we
+provide a source bundle containing:
+- the Circom sources used to build these artifacts; and
+- `iden3/circomlib` at the exact revision listed above; and
+- build instructions.
+
+Source bundle: ./source-bundle.tar.gz

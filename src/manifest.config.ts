@@ -88,6 +88,10 @@ export default defineManifest({
     'https://horizon.stellar.org/*',
     'https://horizon-testnet.stellar.org/*',
     'https://friendbot.stellar.org/*', // testnet faucet (Stellar SDF)
+    // Soroban RPC for the SPP privacy pool (Nethermind testnet deployment;
+    // the offscreen SPP host reads it — extension pages are CORS-scoped, and
+    // host permissions are what lift that for our own surfaces only).
+    'https://soroban-testnet.stellar.org/*',
     'https://veilpay-qzz1.onrender.com/*', // transaction indexer backend
     // The local agent bridge. Loopback only, and every request carries a
     // pairing token, so this grants no access to anything off this machine.

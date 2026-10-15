@@ -91,6 +91,17 @@ export interface PendingGrantRequest {
   createdAt: number;
 }
 
+/** The wallet's privacy-pool (SPP) state, as the privacy surface renders it. */
+export interface SppPoolStatus {
+  poolContractId: string;
+  assetSymbol: string;
+  balanceStroops: string;
+  registered: boolean;
+  bootnodeRequired: boolean;
+  syncedLedger: number;
+  readAt: number;
+}
+
 interface WalletState {
   vaultState: VaultState;
   unlockedUntil: number | null;
@@ -154,6 +165,8 @@ interface WalletState {
   customTokens: CustomToken[];
   /** Base-unit token balances, keyed by token registry id. */
   tokenBalances: Partial<Record<string, bigint>>;
+  /** Privacy-pool (SPP) state; null until read or on failure. */
+  sppStatus: SppPoolStatus | null;
 }
 
 interface WalletActions {
@@ -319,6 +332,19 @@ interface WalletActions {
   >;
   /** Privacy: sweep a found one-time payment into the wallet's Stellar account. */
   claimStealthPayment(txHash: string): Promise<{ txHash: string }>;
+  /** SPP: the wallet's privacy-pool state (private balance, registration). */
+  loadSppStatus(): Promise<SppPoolStatus | null>;
+  /** SPP: register the wallet's pool public keys (enables receiving transfers). */
+  sppRegister(): Promise<{ txHash: string }>;
+  /** SPP: shield public XLM into the privacy pool. */
+  sppDeposit(amountStroops: string): Promise<{ txHash: string; amountStroops: string }>;
+  /** SPP: send a private transfer inside the pool. */
+  sppTransfer(
+    to: string,
+    amountStroops: string,
+  ): Promise<{ txHash: string; amountStroops: string }>;
+  /** SPP: unshield private notes back to public XLM. */
+  sppWithdraw(amountStroops: string): Promise<{ txHash: string; amountStroops: string }>;
 }
 
 const send = createClient('popup' as MessageSource);
@@ -398,6 +424,7 @@ export const useWallet = create<WalletState & WalletActions>((set, get) => ({
   selectedNetworks: {},
   customTokens: [],
   tokenBalances: {},
+  sppStatus: null,
   isLoading: false,
   error: null,
 
@@ -1131,6 +1158,76 @@ export const useWallet = create<WalletState & WalletActions>((set, get) => ({
       return await send('stellar.stealth.claim', { txHash });
     } catch (cause) {
       set({ error: messageFor(cause, 'Could not claim the private payment.') });
+      throw cause;
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
+  // ---- Stellar Private Payments (SPP privacy pool) -------------------------
+
+  loadSppStatus: async () => {
+    try {
+      const status = await send('spp.status', {});
+      const normalized: SppPoolStatus = {
+        poolContractId: status.poolContractId,
+        assetSymbol: status.assetSymbol,
+        balanceStroops: status.balanceStroops,
+        registered: status.registered,
+        bootnodeRequired: status.bootnodeRequired,
+        syncedLedger: status.syncedLedger,
+        readAt: status.readAt,
+      };
+      set({ sppStatus: normalized });
+      return normalized;
+    } catch (cause) {
+      set({ error: messageFor(cause, 'Could not read the privacy pool status.') });
+      return null;
+    }
+  },
+
+  sppRegister: async () => {
+    set({ isLoading: true, error: null });
+    try {
+      return await send('spp.register', {});
+    } catch (cause) {
+      set({ error: messageFor(cause, 'Could not register the privacy keys.') });
+      throw cause;
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
+  sppDeposit: async (amountStroops) => {
+    set({ isLoading: true, error: null });
+    try {
+      return await send('spp.deposit', { amountStroops });
+    } catch (cause) {
+      set({ error: messageFor(cause, 'Could not shield into the privacy pool.') });
+      throw cause;
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
+  sppTransfer: async (to, amountStroops) => {
+    set({ isLoading: true, error: null });
+    try {
+      return await send('spp.transfer', { to, amountStroops });
+    } catch (cause) {
+      set({ error: messageFor(cause, 'Could not send the private payment.') });
+      throw cause;
+    } finally {
+      set({ isLoading: false });
+    }
+  },
+
+  sppWithdraw: async (amountStroops) => {
+    set({ isLoading: true, error: null });
+    try {
+      return await send('spp.withdraw', { amountStroops });
+    } catch (cause) {
+      set({ error: messageFor(cause, 'Could not unshield from the privacy pool.') });
       throw cause;
     } finally {
       set({ isLoading: false });

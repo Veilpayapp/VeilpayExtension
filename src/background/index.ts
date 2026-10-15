@@ -62,6 +62,30 @@ import {
   STEALTH_DATA_KEY,
   type StealthMeta,
 } from '@/core/privacy/stellar-stealth';
+import {
+  signSorobanAuthPreimage,
+  signSppMessage,
+  signSorobanTransactionEnvelope,
+} from '@/core/chains/stellar/soroban-sign';
+import {
+  SPP_ASSET_SYMBOL,
+  SPP_NETWORK_PASSPHRASE,
+  SPP_POOL_CONTRACT_ID,
+} from '@/core/spp/deployment';
+import {
+  SPP_IDLE_ALARM,
+  closeIdleSppHost,
+  ensureSppIdleAlarm,
+  noteSppActivity,
+  runSppOp,
+  sppEverUsed,
+} from '@/core/spp/bridge';
+import {
+  isSppSignRequest,
+  isSppPing,
+  type SppSignRequest,
+  type SppSignResponse,
+} from '@/core/spp/internal-protocol';
 import type { ChainService } from '@/core/chains';
 import {
   addCustomToken,
@@ -2159,6 +2183,109 @@ const handlers: HandlerMap = {
     void appendAudit('stellar.stealth.claimed', { announcementTxHash: payload.txHash, txHash });
     return { txHash };
   },
+
+  // ── Stellar Private Payments (SPP privacy pool, pXLM) ──────────────────
+  //
+  // Every op is privileged (router-enforced): they derive the pool's privacy
+  // keys from a vault-signed message and move funds through the pool. The
+  // SDK itself runs in the offscreen document; these handlers validate,
+  // resolve account 0, and forward over the internal control plane.
+
+  /**
+   * Resolves the wallet's private pool state: balance, registration, and
+   * the deployment summary the privacy surface renders.
+   */
+  'spp.status': async () => {
+    if ((await vault.getState()) !== 'unlocked') {
+      throw new ProtocolError('VAULT_LOCKED', 'Unlock the wallet to view your private balance.');
+    }
+    const address = (await vault.getAccountAddress('stellar', 0)).address;
+    const result = (await runSppOp('status', { address })) as {
+      poolContractId: string;
+      assetSymbol: string;
+      balanceStroops: string;
+      registered: boolean;
+      bootnodeRequired: boolean;
+      syncedLedger: number;
+      readAt: number;
+    };
+    return {
+      poolContractId: result.poolContractId ?? SPP_POOL_CONTRACT_ID,
+      assetSymbol: result.assetSymbol ?? SPP_ASSET_SYMBOL,
+      balanceStroops: result.balanceStroops ?? '0',
+      registered: result.registered === true,
+      bootnodeRequired: result.bootnodeRequired === true,
+      syncedLedger: Number(result.syncedLedger ?? 0),
+      readAt: Number(result.readAt ?? Date.now()),
+    };
+  },
+
+  /**
+   * Registers this wallet's pool public keys in the on-chain registry so
+   * other wallets can send it private transfers by G… address alone.
+   */
+  'spp.register': async () => {
+    if ((await vault.getState()) !== 'unlocked') {
+      throw new ProtocolError('VAULT_LOCKED', 'Unlock the wallet to enable private transfers.');
+    }
+    const address = (await vault.getAccountAddress('stellar', 0)).address;
+    const result = (await runSppOp('register', { address })) as { txHash: string };
+    if (typeof result.txHash !== 'string' || result.txHash.length === 0) {
+      throw new ProtocolError('TX_REJECTED', 'The key registration did not produce a transaction.');
+    }
+    void appendAudit('spp.registered', { txHash: result.txHash });
+    return { txHash: result.txHash };
+  },
+
+  /**
+   * Shields public XLM into the privacy pool: the deposit creates private
+   * notes only this wallet can see or spend.
+   */
+  'spp.deposit': async (payload) => {
+    const { address, spendable } = await sppPreflight(payload.amountStroops);
+    if (spendable < BigInt(payload.amountStroops)) {
+      throw new ProtocolError(
+        'INSUFFICIENT_BALANCE',
+        'Insufficient public XLM balance for this shield amount.',
+      );
+    }
+    const result = (await runSppOp('deposit', {
+      address,
+      amountStroops: payload.amountStroops,
+    })) as { txHash: string; amountStroops: string };
+    void appendAudit('spp.deposit', { txHash: result.txHash, amountStroops: payload.amountStroops });
+    return { txHash: result.txHash, amountStroops: payload.amountStroops };
+  },
+
+  /**
+   * Sends a private transfer inside the pool. The public ledger records only
+   * that the pool was used — not who paid whom or how much.
+   */
+  'spp.transfer': async (payload) => {
+    const { address } = await sppPreflight(payload.amountStroops);
+    const result = (await runSppOp('transfer', {
+      address,
+      amountStroops: payload.amountStroops,
+      to: payload.to,
+    })) as { txHash: string; amountStroops: string };
+    // The recipient address is deliberately NOT audited: the whole point of a
+    // private transfer is that the wallet's own records keep it unlinkable.
+    void appendAudit('spp.transfer', { txHash: result.txHash, amountStroops: payload.amountStroops });
+    return { txHash: result.txHash, amountStroops: payload.amountStroops };
+  },
+
+  /**
+   * Unshields private notes back into the wallet's public XLM balance.
+   */
+  'spp.withdraw': async (payload) => {
+    const { address } = await sppPreflight(payload.amountStroops);
+    const result = (await runSppOp('withdraw', {
+      address,
+      amountStroops: payload.amountStroops,
+    })) as { txHash: string; amountStroops: string };
+    void appendAudit('spp.withdraw', { txHash: result.txHash, amountStroops: payload.amountStroops });
+    return { txHash: result.txHash, amountStroops: payload.amountStroops };
+  },
 };
 
 /** Decimal places used to convert human-readable token amounts to base units. */
@@ -3366,9 +3493,18 @@ function isInternalMessage(value: unknown): value is InternalMessage {
 async function handleInternalMessage(
   message: InternalMessage,
   sender: chrome.runtime.MessageSender
-): Promise<{ ok: boolean }> {
+): Promise<unknown> {
   if (sender.id !== chrome.runtime.id || sender.tab !== undefined) {
     return { ok: false };
+  }
+  if (isSppPing(message)) {
+    // Keepalive from the SPP host while a pool operation is proving. Does
+    // nothing but keep this worker (and the unlocked vault) alive.
+    noteSppActivity();
+    return { ok: true };
+  }
+  if (isSppSignRequest(message)) {
+    return handleSppSignMessage(message);
   }
   if (message.kind !== 'spike:zk-result') {
     return { ok: false };
@@ -3381,8 +3517,109 @@ async function handleInternalMessage(
   }
 
   await writeMeta(ZK_CAPABILITY_KEY, parsed.data);
-  await chrome.offscreen.closeDocument().catch(() => undefined);
+  // Only close the offscreen document when the SPP host has never run — the
+  // SPP runtime lives in the same document and must survive the spike report.
+  if (!sppEverUsed()) {
+    await chrome.offscreen.closeDocument().catch(() => undefined);
+  }
   return { ok: true };
+}
+
+/**
+ * Signs one SPP request from the offscreen host with the vault's Stellar
+ * account 0 key, inside `vault.withAccount` so the key never leaves this
+ * service worker.
+ *
+ * The requested address must match the wallet's own account (the SDK embeds
+ * it in the preimages it hands over; a mismatch means the runtime is bound to
+ * an account that is not ours), and transactions are only signed for the SPP
+ * deployment's network — a passphrase mismatch would mean a transaction bound
+ * to a different network than the pool lives on.
+ */
+async function handleSppSignMessage(message: SppSignRequest): Promise<SppSignResponse> {
+  if ((await vault.getState()) !== 'unlocked') {
+    return {
+      ok: false,
+      code: 'VAULT_LOCKED',
+      message: 'Unlock the wallet to use private payments.',
+    };
+  }
+
+  const expectedAddress = (await vault.getAccountAddress('stellar', 0)).address;
+  if (message.address !== expectedAddress) {
+    return {
+      ok: false,
+      message: 'The privacy runtime asked to sign for an account this wallet does not hold.',
+    };
+  }
+
+  try {
+    const result = await vault.withAccount('stellar', 0, async (account) => {
+      if (account.address !== message.address) {
+        throw new Error('The signing account does not match the pool session.');
+      }
+      switch (message.op) {
+        case 'signMessage': {
+          if (typeof message.message !== 'string' || message.message.length === 0) {
+            throw new Error('The key-derivation message is missing.');
+          }
+          return signSppMessage(message.message, account.privateKey);
+        }
+        case 'signTransaction': {
+          if (typeof message.xdr !== 'string' || message.xdr.length === 0) {
+            throw new Error('The transaction envelope is missing.');
+          }
+          const passphrase = message.networkPassphrase ?? SPP_NETWORK_PASSPHRASE;
+          if (passphrase !== SPP_NETWORK_PASSPHRASE) {
+            throw new Error('The pool transaction targets a different network than the pool.');
+          }
+          return signSorobanTransactionEnvelope(message.xdr, account.privateKey, passphrase);
+        }
+        case 'signAuthEntry': {
+          if (typeof message.preimage !== 'string' || message.preimage.length === 0) {
+            throw new Error('The authorization preimage is missing.');
+          }
+          return signSorobanAuthPreimage(message.preimage, account.privateKey);
+        }
+        default:
+          throw new Error(`Unknown SPP signing operation: ${String(message.op)}`);
+      }
+    });
+    return { ok: true, result, address: message.address };
+  } catch (cause) {
+    // All messages above are authored here and display-safe by construction.
+    const detail = cause instanceof Error ? cause.message : 'The signing request failed.';
+    return { ok: false, message: detail };
+  }
+}
+
+/**
+ * Shared pre-flight for SPP money ops: the vault must be unlocked, the
+ * selected Stellar network must be the SPP deployment's network (the pool
+ * exists only there), the amount must be positive, and account 0's address
+ * is what the pool session binds to. Returns the address and, when cheap to
+ * read, the spendable public balance for pre-submit checks.
+ */
+async function sppPreflight(amountStroops: string): Promise<{ address: string; spendable: bigint }> {
+  if ((await vault.getState()) !== 'unlocked') {
+    throw new ProtocolError('VAULT_LOCKED', 'Unlock the wallet to use private payments.');
+  }
+  const amount = BigInt(amountStroops);
+  if (amount <= 0n) {
+    throw new ProtocolError('BAD_REQUEST', 'The amount must be greater than zero.');
+  }
+  const passphrase = await resolveStellarPassphrase();
+  if (passphrase !== SPP_NETWORK_PASSPHRASE) {
+    const stellarNetwork = await getSelectedNetwork('stellar');
+    throw new ProtocolError(
+      'BAD_REQUEST',
+      `Private payments run on Stellar testnet — the selected network is ${stellarNetwork.name}. Switch the Stellar network to Testnet first.`
+    );
+  }
+  const address = (await vault.getAccountAddress('stellar', 0)).address;
+  const service = createChainService('stellar', await resolveStellarEndpoints());
+  const spendable = await service.getBalance(address).catch(() => 0n);
+  return { address, spendable };
 }
 
 /**
@@ -3404,6 +3641,8 @@ console.info('[veilpay] service worker module evaluating');
 // mark. Creating an alarm that already exists is a no-op, so this is safe
 // to call unconditionally.
 ensureIdleAlarm();
+// Same reasoning for the SPP host idle-close alarm.
+ensureSppIdleAlarm();
 let firstMessage = true;
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (firstMessage) {
@@ -3453,8 +3692,13 @@ void restartAgentBridge();
  * enforces the exact deadline, so the alarm only needs to poke it.
  */
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name !== IDLE_ALARM) return;
-  void vault.getState(); // relocks internally once the deadline has passed
+  if (alarm.name === IDLE_ALARM) {
+    void vault.getState(); // relocks internally once the deadline has passed
+    return;
+  }
+  if (alarm.name === SPP_IDLE_ALARM) {
+    void closeIdleSppHost();
+  }
 });
 
 function ensureIdleAlarm(): void {
@@ -3463,6 +3707,7 @@ function ensureIdleAlarm(): void {
 
 chrome.runtime.onInstalled.addListener(() => {
   ensureIdleAlarm();
+  ensureSppIdleAlarm();
   void runZkSpikeOnce();
   void initWalletConnect();
   void restartAgentBridge();
@@ -3471,6 +3716,7 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.runtime.onStartup.addListener(() => {
   ensureIdleAlarm();
+  ensureSppIdleAlarm();
   // Retried on every startup. If the offscreen document never reported — crash,
   // closed early, browser quit mid-probe — the capability stays unwritten, and
   // without this the D3 question would never be measured again.

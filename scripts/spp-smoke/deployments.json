@@ -1,0 +1,30 @@
+{
+  "network": "testnet",
+  "kdf_domain": "Veilpay",
+  "deployer": "GAZTPL3VGFXJZSR6JOP67EEJRBVNZVQ2WF2HJ5GAPK6E74LDW524NHV7",
+  "admin": "GAZTPL3VGFXJZSR6JOP67EEJRBVNZVQ2WF2HJ5GAPK6E74LDW524NHV7",
+  "asp_membership": "CDZYZTSO23R6QITJUUJ566PUYB3UAU5T3YTHMBB3QYAWT32L5DVO4BLB",
+  "asp_non_membership": "CDWL3BEDZB43LB5RGLTSIQR3DCMPI3S6KDJKAPQMUV43GN4W3YUXR5MF",
+  "asp_membership_wasm_hash": "738c6d0746a3d6c6a3e32312776ef453eb0e1ae0034db8cf7d88c7da2a589ea6",
+  "asp_non_membership_wasm_hash": "8011a585cd2eaa52620b53c23cdaff202c6347f5e14d25fcda50b39eb447f975",
+  "verifiers": {
+    "B": "CBLHX5IFJ5OOSETSEDLSSVYVGVEK7RLHO5Z37K74CKDAAUPX5JOWI72C"
+  },
+  "public_key_registry": "CDG3G37527D6BT62BSZJKM3QFBL7NDONOLMOSKH2RHDNE7XCKP7L4ZSU",
+  "pools": [
+    {
+      "poolContractId": "CALMZTI56TEDERLWXZJOS5TAN4QN2B36NAJK26MWKND4H5IG4NLPWEJ2",
+      "tokenContractId": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      "deploymentLedger": 5166775,
+      "enabled": true,
+      "policyFlags": [
+        "blocklist"
+      ],
+      "asset": {
+        "kind": "native"
+      }
+    }
+  ],
+  "networkPassphrase": "Test SDF Network ; September 2015",
+  "rpcUrl": "https://soroban-testnet.stellar.org/"
+}

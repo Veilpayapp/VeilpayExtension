@@ -38,3 +38,24 @@ export function nativeDecimalsFor(chain: string): number {
       return 0;
   }
 }
+
+/**
+ * Exact decimal-string → base-unit parsing for the UI.
+ *
+ * Truncates (never rounds) the fraction beyond `decimals` and returns 0n for
+ * malformed input, mirroring `baseToDecimal` in reverse. The background
+ * re-parses and validates every amount it is sent, so a UI-side 0n only means
+ * "the form is not ready yet".
+ */
+export function decimalToBase(decimal: string, decimals: number): bigint {
+  const dot = decimal.indexOf('.');
+  const whole = dot === -1 ? decimal : decimal.slice(0, dot);
+  const frac = dot === -1 ? '' : decimal.slice(dot + 1);
+  const truncated = frac.slice(0, decimals).padEnd(decimals, '0');
+  const scale = 10n ** BigInt(decimals);
+  try {
+    return BigInt(whole || '0') * scale + BigInt(truncated || '0');
+  } catch {
+    return 0n;
+  }
+}

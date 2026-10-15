@@ -105,6 +105,7 @@ export function Dashboard({
   onScan,
   onSelectTx,
   onSeeAllActivity,
+  onPrivacy,
 }: {
   accounts: AccountView[];
   onSend: (idx: number) => void;
@@ -114,6 +115,7 @@ export function Dashboard({
   onScan?: () => void;
   onSelectTx?: (tx: IndexerTx) => void;
   onSeeAllActivity?: () => void;
+  onPrivacy?: () => void;
 }): JSX.Element {
   const {
     balances,
@@ -128,6 +130,8 @@ export function Dashboard({
     customTokens,
     tokenBalances,
     removeToken,
+    sppStatus,
+    loadSppStatus,
   } = useWallet();
   const [txs, setTxs] = useState<IndexerTx[]>([]);
   const [txLoading, setTxLoading] = useState(false);
@@ -156,6 +160,18 @@ export function Dashboard({
   // below so a network switch refetches balances AND history (both are
   // network-scoped: a Sepolia history list is not an Ethereum one).
   const activeNetworkId = selectedNetworks[activeChain];
+
+  // The privacy pool balance rides along with the dashboard refresh: the
+  // pXLM tile renders the live private balance. A locked or failing read
+  // degrades to the last known value — never a fabricated number.
+  useEffect(() => {
+    void loadSppStatus();
+  }, [loadSppStatus, activeNetworkId]);
+
+  const sppBalanceText =
+    sppStatus !== null
+      ? `${baseToDecimal(BigInt(sppStatus.balanceStroops), 7, 7)} ${sppStatus.assetSymbol}`
+      : '— pXLM';
 
   useEffect(() => {
     void loadAllBalances();
@@ -460,16 +476,21 @@ export function Dashboard({
         </span>
       </div>
 
-      {/* 5. Privacy Section (matches Screenshot 1).
-            Stealth-address payments (core/privacy/stealth.ts) are a real
-            cryptographic foundation but are NOT wired into the send path yet.
-            Shown as coming soon — never a fabricated private balance. */}
+      {/* 5. Privacy Section — the pXLM privacy pool (Stellar Private Payments).
+            The private balance is the live pool balance; the tile opens the
+            privacy surface. Stellar-account-scoped: the pool exists on
+            testnet, so the tile needs the Stellar account loaded. */}
       <section className="flex flex-col gap-2">
         <h3 className="font-display text-sm font-bold text-white">Privacy</h3>
-        <div className="flex items-center justify-between rounded-xl border border-surface-700/80 bg-surface-800/80 p-3">
+        <button
+          type="button"
+          onClick={onPrivacy}
+          aria-label="Open private payments"
+          className="flex w-full items-center justify-between rounded-xl border border-surface-700/80 bg-surface-800/80 p-3 text-left transition-colors hover:border-accent-500/50"
+        >
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-accent-500/60 bg-surface-900 text-accent-500">
-              <span className="text-base font-bold">◇</span>
+              <Glyph name="lock" className="h-5 w-5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
@@ -485,15 +506,15 @@ export function Dashboard({
           </div>
 
           <div className="text-right">
-            <div className="font-mono text-[10px] font-semibold text-content-tertiary uppercase tracking-wider">
-              Coming soon
+            <div className="font-mono text-xs font-bold text-white">
+              {sppBalanceText}
             </div>
             <div className="mt-0.5 flex items-center justify-end gap-1 font-mono text-[10px] font-bold tracking-wider text-accent-500">
               <Glyph name="lock" className="h-2.5 w-2.5" />
               <span>PRIVATE</span>
             </div>
           </div>
-        </div>
+        </button>
       </section>
 
       {/* 6. Assets Section (matches Screenshot 1) */}

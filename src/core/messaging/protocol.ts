@@ -108,6 +108,11 @@ export const RequestKind = z.enum([
   'stellar.stealth.publish',
   'stellar.stealth.scan',
   'stellar.stealth.claim',
+  'spp.status',
+  'spp.register',
+  'spp.deposit',
+  'spp.transfer',
+  'spp.withdraw',
 ]);
 export type RequestKind = z.infer<typeof RequestKind>;
 
@@ -200,6 +205,14 @@ export const PRIVILEGED_KINDS: readonly RequestKind[] = [
   'stellar.stealth.publish',
   'stellar.stealth.scan',
   'stellar.stealth.claim',
+  // SPP (privacy pool) ops read the wallet's private pool balance, derive the
+  // pool keys from a vault-signed message, and move funds through the pool.
+  // Every one of them requires the unlocked vault and the wallet's own UI.
+  'spp.status',
+  'spp.register',
+  'spp.deposit',
+  'spp.transfer',
+  'spp.withdraw',
 ] as const;
 
 export function isPrivilegedKind(kind: RequestKind): boolean {
@@ -1053,6 +1066,55 @@ export const StellarStealthClaimRequest = baseEnvelope.extend({
   }),
 });
 
+// ── Stellar Private Payments (SPP privacy pool, pXLM) ─────────────────────
+
+/**
+ * Pool status for the wallet: private balance, registration state, and the
+ * deployment summary the UI needs to render the privacy surface.
+ *
+ * All SPP kinds are privileged — they read the wallet's private pool state and
+ * move funds, and the pool keys are derived from a vault-signed message.
+ */
+export const SppStatusRequest = baseEnvelope.extend({
+  kind: z.literal('spp.status'),
+  payload: z.object({}),
+});
+
+/** Registers the wallet's pool public keys on-chain (public key registry). */
+export const SppRegisterRequest = baseEnvelope.extend({
+  kind: z.literal('spp.register'),
+  payload: z.object({}),
+});
+
+/** Shields XLM into the privacy pool (creates private notes). */
+export const SppDepositRequest = baseEnvelope.extend({
+  kind: z.literal('spp.deposit'),
+  payload: z.object({
+    /** Amount in stroops (XLM's 10⁻⁷ base unit), as a decimal string. */
+    amountStroops: Decimal,
+  }),
+});
+
+/** Sends a private transfer inside the pool to a registered recipient. */
+export const SppTransferRequest = baseEnvelope.extend({
+  kind: z.literal('spp.transfer'),
+  payload: z.object({
+    /** Recipient's ordinary Stellar address (G…); must have registered keys. */
+    to: z.string().regex(/^G[A-Z2-7]{55}$/),
+    /** Amount in stroops, as a decimal string. */
+    amountStroops: Decimal,
+  }),
+});
+
+/** Unshields private notes back to the wallet's public XLM balance. */
+export const SppWithdrawRequest = baseEnvelope.extend({
+  kind: z.literal('spp.withdraw'),
+  payload: z.object({
+    /** Amount in stroops, as a decimal string. */
+    amountStroops: Decimal,
+  }),
+});
+
 export const Request = z.discriminatedUnion('kind', [
   PingRequest,
   VaultStatusRequest,
@@ -1126,6 +1188,11 @@ export const Request = z.discriminatedUnion('kind', [
   StellarStealthPublishRequest,
   StellarStealthScanRequest,
   StellarStealthClaimRequest,
+  SppStatusRequest,
+  SppRegisterRequest,
+  SppDepositRequest,
+  SppTransferRequest,
+  SppWithdrawRequest,
 ]);
 export type Request = z.infer<typeof Request>;
 
@@ -1479,6 +1546,34 @@ export interface ResponseData {
   }>;
   /** The account-merge sweep that claimed a stealth payment. */
   'stellar.stealth.claim': { txHash: string };
+
+  // ── Stellar Private Payments (SPP privacy pool, pXLM) ─────────────────────
+
+  /** Pool status: private balance, registration, and deployment summary. */
+  'spp.status': {
+    /** The pool this wallet talks to (contract id, C…). */
+    poolContractId: string;
+    /** Token symbol the pool wraps ("pXLM" presentation is UI-side). */
+    assetSymbol: string;
+    /** Spendable private balance in stroops (decimal string of a bigint). */
+    balanceStroops: string;
+    /** Whether the wallet's pool public keys are registered on-chain. */
+    registered: boolean;
+    /** Whether the local indexer needs a historical-sync bootnode. */
+    bootnodeRequired: boolean;
+    /** Latest ledger the local pool index has ingested. */
+    syncedLedger: number;
+    /** Epoch ms of the status read. */
+    readAt: number;
+  };
+  /** The public key registry transaction hash. */
+  'spp.register': { txHash: string };
+  /** The deposit result: transaction hash plus pool-internal details. */
+  'spp.deposit': { txHash: string; amountStroops: string };
+  /** The private transfer result: transaction hash (amount/recipient stay private). */
+  'spp.transfer': { txHash: string; amountStroops: string };
+  /** The withdraw result: transaction hash plus pool-internal details. */
+  'spp.withdraw': { txHash: string; amountStroops: string };
 }
 
 export function newId(): string {

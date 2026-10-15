@@ -6,18 +6,26 @@
  * `vite build`, walks `dist/`, and gzips each file to get a realistic
  * over-the-wire figure rather than raw bytes.
  *
+ * `dist/spp/` — the Stellar Private Payments runtime (WASM, workers, and
+ * circuit proving keys) — is DATA, not code: it is loaded by URL from the
+ * offscreen document, never parsed by the page. It is measured and reported
+ * separately instead of counting against the code budget; the whole SDK
+ * cannot fit under a code-size ceiling by construction.
+ *
  * Chrome Web Store rejects packages over 100MB, but the real constraint is
  * install-time UX and review scrutiny — hence the tighter self-imposed limit.
  */
 
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { gzipSync } from 'node:zlib';
-import { join, relative } from 'node:path';
+import { join, relative, sep } from 'node:path';
 
 const DIST = 'dist';
 const BUDGET_BYTES = 5 * 1024 * 1024;
 /** Files above this individually are worth naming in the report. */
 const NOTABLE_BYTES = 200 * 1024;
+/** Data assets measured separately from the code budget. */
+const DATA_PREFIXES = ['spp'];
 
 async function walk(dir) {
   const out = [];
@@ -54,15 +62,26 @@ async function main() {
 
   let totalGzip = 0;
   let totalRaw = 0;
+  let dataGzip = 0;
+  let dataRaw = 0;
   const notable = [];
 
   for (const file of files) {
     const contents = await readFile(file);
     const gzipped = gzipSync(contents, { level: 9 }).length;
+    // Path separators are platform-dependent; normalize so the data-prefix
+    // exclusion behaves identically on Windows and POSIX.
+    const rel = relative(DIST, file).split(sep).join('/');
+    const isData = DATA_PREFIXES.some((prefix) => rel.startsWith(`${prefix}/`) || rel === prefix);
+    if (isData) {
+      dataRaw += contents.length;
+      dataGzip += gzipped;
+      continue;
+    }
     totalRaw += contents.length;
     totalGzip += gzipped;
     if (gzipped >= NOTABLE_BYTES) {
-      notable.push({ path: relative(DIST, file), gzipped });
+      notable.push({ path: rel, gzipped });
     }
   }
 
@@ -73,6 +92,7 @@ async function main() {
   console.log(`Gzip:       ${human(totalGzip)}`);
   console.log(`Budget:     ${human(BUDGET_BYTES)}`);
   console.log(`Headroom:   ${human(BUDGET_BYTES - totalGzip)}`);
+  console.log(`SPP data:   ${human(dataGzip)} gzip (${human(dataRaw)} raw, excluded from the code budget)`);
 
   if (notable.length > 0) {
     console.log('\nLargest contributors (gzip):');

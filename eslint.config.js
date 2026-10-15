@@ -5,7 +5,18 @@ import tseslint from 'typescript-eslint';
 
 export default [
   {
-    ignores: ['dist/**', 'node_modules/**', 'coverage/**', '.vite/**'],
+    // third_party/ is vendored, generated output (the SPP wasm-bindgen
+    // SDK and its circuit artifacts); scripts/spp-smoke/signer.mjs is the
+    // esbuild bundle the smoke driver rebuilds. Neither is our source and
+    // neither must be linted or reformatted.
+    ignores: [
+      'dist/**',
+      'node_modules/**',
+      'coverage/**',
+      '.vite/**',
+      'third_party/**',
+      'scripts/spp-smoke/signer.mjs',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
@@ -21,6 +32,20 @@ export default [
     rules: {
       'no-console': 'off',
       'no-empty': 'off',
+    },
+  },
+  {
+    // Browser pages served by the SPP smoke server (loaded in Edge via CDP).
+    files: ['scripts/spp-smoke/*.js'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      globals: {
+        ...globals.browser,
+      },
+    },
+    rules: {
+      'no-console': 'off',
     },
   },
   {

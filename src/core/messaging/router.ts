@@ -610,6 +610,36 @@ export async function dispatch(
           ok: true,
           data: await handlers['stellar.stealth.claim'](request.payload, ctx),
         };
+      case 'spp.status':
+        return {
+          id: request.id,
+          ok: true,
+          data: await handlers['spp.status'](request.payload, ctx),
+        };
+      case 'spp.register':
+        return {
+          id: request.id,
+          ok: true,
+          data: await handlers['spp.register'](request.payload, ctx),
+        };
+      case 'spp.deposit':
+        return {
+          id: request.id,
+          ok: true,
+          data: await handlers['spp.deposit'](request.payload, ctx),
+        };
+      case 'spp.transfer':
+        return {
+          id: request.id,
+          ok: true,
+          data: await handlers['spp.transfer'](request.payload, ctx),
+        };
+      case 'spp.withdraw':
+        return {
+          id: request.id,
+          ok: true,
+          data: await handlers['spp.withdraw'](request.payload, ctx),
+        };
       default: {
         const exhaustive: never = request;
         void exhaustive;
