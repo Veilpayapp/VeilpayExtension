@@ -80,16 +80,45 @@ async function main() {
     // `service-worker-loader.js` — distinctive enough to disambiguate from
     // Edge's built-in extensions, which also appear in the target list.
     let extensionId = null;
+    let swTarget = null;
     for (let i = 0; i < 60 && extensionId === null; i += 1) {
       const targets = await cdpJson('/json/list');
       const target = targets.find(
         (t) => t.type === 'service_worker' && (t.url ?? '').includes('service-worker-loader'),
       );
-      if (target) extensionId = new URL(target.url).host;
-      else await sleep(500);
+      if (target) {
+        extensionId = new URL(target.url).host;
+        swTarget = target;
+      } else await sleep(500);
     }
     if (extensionId === null) throw new Error('Extension did not load.');
     console.log(`[e2e] extension id: ${extensionId}`);
+
+    // Mirror the service worker's console + exceptions into the e2e log:
+    // every handler error is console.error'd there first, and without this
+    // the e2e only shows the flattened protocol response.
+    {
+      const sw = new WebSocket(swTarget.webSocketDebuggerUrl);
+      await new Promise((res, rej) => {
+        sw.addEventListener('open', res, { once: true });
+        sw.addEventListener('error', rej, { once: true });
+      });
+      sw.addEventListener('message', (event) => {
+        const message = JSON.parse(event.data);
+        if (message.method === 'Runtime.consoleAPICalled') {
+          const text = (message.params.args ?? [])
+            .map((arg) => arg.value ?? arg.description ?? '')
+            .join(' ');
+          console.log(`[sw:${message.params.type}] ${text}`);
+        } else if (message.method === 'Runtime.exceptionThrown') {
+          const detail = message.params.exceptionDetails;
+          const text = detail?.exception?.description ?? detail?.text ?? 'unknown exception';
+          console.log(`[sw:exception] ${text.split('\n').slice(0, 6).join(' | ')}`);
+        }
+      });
+      const send = (method, params = {}) => sw.send(JSON.stringify({ id: 0, method, params }));
+      send('Runtime.enable');
+    }
 
     // Open the popup page as a tab: same extension page the UI runs in, and
     // CDP can evaluate inside the extension origin.
@@ -215,6 +244,15 @@ async function main() {
     const sppCross = await request('spp.status #2c (after cross-wallet transfer)', 'spp.status', {});
     const balanceCross = BigInt(sppCross?.data?.balanceStroops ?? '0');
 
+    // Read the public balance right BEFORE the withdraw: fees of every
+    // earlier transaction are already deducted, so the post-withdraw delta
+    // isolates the unshield credit from the fee variance of the other ops.
+    const balanceBeforeWithdraw = await request('account.balance #2a', 'account.balance', {
+      chain: 'stellar',
+      address: stellarAddress,
+    });
+    const publicBeforeWithdraw = BigInt(balanceBeforeWithdraw?.data?.balance ?? '0');
+
     const withdraw = await request('spp.withdraw (unshield)', 'spp.withdraw', {
       amountStroops: WITHDRAW_STROOPS.toString(),
     });
@@ -256,17 +294,29 @@ async function main() {
       balance3 === balance1 + DEPOSIT_STROOPS - WITHDRAW_STROOPS - CROSS_TRANSFER_STROOPS,
       `final private balance = deposit − withdraw − cross transfer (${balance3})`,
     );
-    // Soroban resource fees for three pool transactions are several XLM; the
-    // exact figure varies with footprint, so the public-balance assertions
-    // use a generous fee allowance rather than exact arithmetic.
-    const feeAllowance = 15_000_000n; // 1.5 XLM
+    // Soroban resource fees for the five pool transactions (register,
+    // deposit, self-transfer, cross-wallet transfer, withdraw) vary with the
+    // footprint — observed between ~0.5 and ~1.2 XLM per transaction — so the
+    // total-balance assertion uses a per-transaction allowance rather than
+    // exact arithmetic.
+    const POOL_TX_COUNT = 5n;
+    const feeAllowance = 2_000_000n * POOL_TX_COUNT; // 2 XLM per pool tx
     expect(
       publicAfter < publicBefore,
       `public XLM decreased (${formatStroops(publicBefore)} → ${formatStroops(publicAfter)})`,
     );
     expect(
       publicAfter > publicBefore - DEPOSIT_STROOPS - feeAllowance,
-      'withdraw was credited back to the public balance',
+      `public XLM reflects the deposit within fee variance (${formatStroops(publicAfter)})`,
+    );
+    // The withdraw credit is measured precisely: the public balance read
+    // just before the withdraw (fees of earlier txs already deducted) must
+    // have grown by the unshielded amount, minus only the withdraw
+    // transaction's own fee.
+    const withdrawFeeSlack = 1_500_000n; // 1.5 XLM
+    expect(
+      publicAfter >= publicBeforeWithdraw + WITHDRAW_STROOPS - withdrawFeeSlack,
+      `withdraw was credited back to the public balance (${formatStroops(publicBeforeWithdraw)} → ${formatStroops(publicAfter)})`,
     );
     expect(spp3?.data?.registered === true, 'wallet is registered to receive privately');
 
@@ -295,20 +345,37 @@ function formatStroops(stroops) {
 }
 
 async function fundAndWait(address) {
-  const response = await fetch(`https://friendbot.stellar.org/?addr=${encodeURIComponent(address)}`);
-  const body = await response.json().catch(() => ({}));
-  console.log(`[e2e] friendbot: successful=${body.successful}`);
+  // The testnet faucet and Horizon are public services; transient resets
+  // (ECONNRESET) happen. Retry both before giving up.
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    try {
+      const response = await fetch(
+        `https://friendbot.stellar.org/?addr=${encodeURIComponent(address)}`,
+      );
+      const body = await response.json().catch(() => ({}));
+      console.log(`[e2e] friendbot: successful=${body.successful}`);
+      break;
+    } catch (error) {
+      console.log(`[e2e] friendbot attempt ${attempt} failed: ${error.cause?.code ?? error.message}`);
+      if (attempt === 5) throw error;
+      await sleep(2000 * attempt);
+    }
+  }
   for (let i = 0; i < 30; i += 1) {
-    const horizon = await fetch(
-      `https://horizon-testnet.stellar.org/accounts/${encodeURIComponent(address)}`,
-    );
-    if (horizon.ok) {
-      const account = await horizon.json();
-      const xlm = account.balances?.find((b) => b.asset_type === 'native')?.balance;
-      if (xlm !== undefined) {
-        console.log(`[e2e] funded: ${xlm} XLM`);
-        return;
+    try {
+      const horizon = await fetch(
+        `https://horizon-testnet.stellar.org/accounts/${encodeURIComponent(address)}`,
+      );
+      if (horizon.ok) {
+        const account = await horizon.json();
+        const xlm = account.balances?.find((b) => b.asset_type === 'native')?.balance;
+        if (xlm !== undefined) {
+          console.log(`[e2e] funded: ${xlm} XLM`);
+          return;
+        }
       }
+    } catch {
+      // Transient Horizon hiccup; poll again.
     }
     await sleep(2000);
   }

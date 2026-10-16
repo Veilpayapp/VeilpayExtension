@@ -25,7 +25,8 @@
 
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["src/*"],
+      "@tests/*": ["tests/*"]
     },
     "types": ["chrome", "vite/client", "node"]
   },

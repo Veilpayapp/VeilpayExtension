@@ -63,12 +63,15 @@ import {
   type StealthMeta,
 } from '@/core/privacy/stellar-stealth';
 import {
+  assertAuthPreimageBoundToNetwork,
+  assertEnvelopeSourcedFrom,
   signSorobanAuthPreimage,
   signSppMessage,
   signSorobanTransactionEnvelope,
 } from '@/core/chains/stellar/soroban-sign';
 import {
   SPP_ASSET_SYMBOL,
+  SPP_KEY_DERIVATION_MESSAGE,
   SPP_NETWORK_PASSPHRASE,
   SPP_POOL_CONTRACT_ID,
 } from '@/core/spp/deployment';
@@ -83,6 +86,7 @@ import {
 import {
   isSppSignRequest,
   isSppPing,
+  isOffscreenDocumentSender,
   type SppSignRequest,
   type SppSignResponse,
 } from '@/core/spp/internal-protocol';
@@ -3494,7 +3498,13 @@ async function handleInternalMessage(
   message: InternalMessage,
   sender: chrome.runtime.MessageSender
 ): Promise<unknown> {
-  if (sender.id !== chrome.runtime.id || sender.tab !== undefined) {
+  // The D3 spike and the SPP runtime live in the offscreen document, so every
+  // internal message — pings, signing callbacks, the spike report — must come
+  // from exactly that document. The URL check is Chrome-stamped: a popup or
+  // options page (or a compromised one) cannot reach `spp:sign`, whose
+  // signTransaction arm signs wallet-sourced envelopes with no approval
+  // surface, and cannot drive the keepalive bookkeeping either.
+  if (!isOffscreenDocumentSender(sender)) {
     return { ok: false };
   }
   if (isSppPing(message)) {
@@ -3563,6 +3573,14 @@ async function handleSppSignMessage(message: SppSignRequest): Promise<SppSignRes
           if (typeof message.message !== 'string' || message.message.length === 0) {
             throw new Error('The key-derivation message is missing.');
           }
+          // The ONLY message the SDK legitimately needs signed is the
+          // derivation message for THIS deployment; its signature is the
+          // seed of the pool's privacy keys. Signing anything else would
+          // turn this arm into an arbitrary-message SEP-53 ownership-proof
+          // oracle for the wallet's key.
+          if (message.message !== SPP_KEY_DERIVATION_MESSAGE) {
+            throw new Error('The key-derivation message does not match this pool deployment.');
+          }
           return signSppMessage(message.message, account.privateKey);
         }
         case 'signTransaction': {
@@ -3573,12 +3591,23 @@ async function handleSppSignMessage(message: SppSignRequest): Promise<SppSignRes
           if (passphrase !== SPP_NETWORK_PASSPHRASE) {
             throw new Error('The pool transaction targets a different network than the pool.');
           }
+          // Trust-boundary gate: the envelope must be paid for by THIS
+          // account. Without it, a compromised SDK could hand over an
+          // arbitrary transaction (e.g. a classic payment out of the
+          // wallet) and have it signed as a "pool operation".
+          assertEnvelopeSourcedFrom(message.xdr, account.privateKey);
           return signSorobanTransactionEnvelope(message.xdr, account.privateKey, passphrase);
         }
         case 'signAuthEntry': {
           if (typeof message.preimage !== 'string' || message.preimage.length === 0) {
             throw new Error('The authorization preimage is missing.');
           }
+          // A preimage embeds its networkId INSIDE the signed bytes, so an
+          // unpinned check here would sign Soroban authorizations for any
+          // network (the passphrase gate that protects signTransaction
+          // cannot see it). Pin the preimage to the pool's network — and
+          // to being a Soroban authorization preimage at all.
+          assertAuthPreimageBoundToNetwork(message.preimage, SPP_NETWORK_PASSPHRASE);
           return signSorobanAuthPreimage(message.preimage, account.privateKey);
         }
         default:

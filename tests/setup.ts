@@ -29,6 +29,13 @@ function makeChromeStub() {
       id: 'veilpay-test',
       sendMessage: vi.fn(),
       getURL: (path: string) => `chrome-extension://veilpay-test/${path}`,
+      getManifest: () =>
+        ({
+          manifest_version: 3,
+          name: 'Veilpay',
+          version: '0.0.1',
+          background: { service_worker: 'service-worker-loader.js', type: 'module' },
+        }) as unknown as chrome.runtime.ManifestV3,
       onMessage: { addListener: vi.fn() },
       onInstalled: { addListener: vi.fn() },
       onStartup: { addListener: vi.fn() },

@@ -230,7 +230,12 @@ async function ensureRuntime(address: string): Promise<void> {
     if (account === null || accountAddress !== address) {
       account = await client.account(
         { networkPassphrase: SPP_NETWORK_PASSPHRASE, userAddress: address },
-        createBackgroundSigner(),
+        // The signer is bound to THIS address at creation: the callbacks
+        // fire later (mid-proof), when the module-global binding may since
+        // have been re-pointed at another wallet by a concurrent exec — the
+        // closure keeps the session's requests consistent with the account
+        // the SDK holds.
+        createBackgroundSigner(address),
       );
       accountAddress = address;
       pool = null;
@@ -262,14 +267,19 @@ async function ensureRuntime(address: string): Promise<void> {
  * The signer handed to the SDK. Each callback round-trips to the background,
  * which signs inside `vault.withAccount` with the wallet's Stellar account 0
  * key and returns the base64 signature / signed envelope.
+ *
+ * `address` is bound at CREATION time (the address of the account session
+ * being built): the callbacks fire later — mid-proof — when the module-global
+ * binding may since have moved to another wallet, and a session must keep
+ * signing as the account the SDK believes it holds. (The background
+ * independently re-checks the address against the vault, so a drift fails
+ * closed rather than signing for a stranger.)
  */
-function createBackgroundSigner(): SdkSigner {
+function createBackgroundSigner(address: string): SdkSigner {
   const call = async (
     op: 'signMessage' | 'signTransaction' | 'signAuthEntry',
     body: { message?: string; xdr?: string; preimage?: string; networkPassphrase?: string },
   ): Promise<string> => {
-    const address = accountAddress;
-    if (address === null) throw new Error('The SPP account session is not bound yet.');
     const response = (await chrome.runtime.sendMessage({
       channel: INTERNAL_CHANNEL,
       kind: 'spp:sign',
@@ -291,16 +301,12 @@ function createBackgroundSigner(): SdkSigner {
 
   return {
     async getPublicKey() {
-      const address = accountAddress;
-      if (address === null) throw new Error('The SPP account session is not bound yet.');
       return address;
     },
     async signMessage(message) {
-      const address = accountAddress!;
       return { signedMessage: await call('signMessage', { message }), signerAddress: address };
     },
     async signTransaction(xdr, opts = {}) {
-      const address = accountAddress!;
       return {
         signedTxXdr: await call('signTransaction', {
           xdr,
@@ -310,7 +316,6 @@ function createBackgroundSigner(): SdkSigner {
       };
     },
     async signAuthEntry(preimage) {
-      const address = accountAddress!;
       return {
         signedAuthEntry: await call('signAuthEntry', { preimage }),
         signerAddress: address,
@@ -328,11 +333,21 @@ function createBackgroundSigner(): SdkSigner {
  * between — long enough for MV3 to evict the service worker, which locks the
  * vault and kills the in-flight op at the next signing callback. A ping every
  * 20 s keeps the worker (and the unlocked session) alive while an op runs.
+ *
+ * The keepalive is capped: a promise that never settles must not ping (and
+ * keep the service worker and the offscreen document) alive forever — the
+ * cap releases both to their normal idle lifecycles.
  */
 const KEEPALIVE_INTERVAL_MS = 20_000;
+const KEEPALIVE_MAX_MS = 15 * 60_000;
 
 function startKeepalive(): () => void {
+  const startedAt = Date.now();
   const timer = setInterval(() => {
+    if (Date.now() - startedAt >= KEEPALIVE_MAX_MS) {
+      clearInterval(timer);
+      return;
+    }
     void chrome.runtime
       .sendMessage({ channel: INTERNAL_CHANNEL, kind: 'spp:ping', id: crypto.randomUUID() })
       .catch(() => undefined);
@@ -343,6 +358,24 @@ function startKeepalive(): () => void {
 // ---------------------------------------------------------------------------
 // Operation execution (background → offscreen)
 // ---------------------------------------------------------------------------
+
+/**
+ * Parses a stroops amount from the control-plane payload.
+ *
+ * The request bus already validates amounts as digit strings, but this path
+ * is also reachable from a forged (now sender-checked, but still) internal
+ * message — a clean, specific error beats a bare BigInt SyntaxError.
+ */
+function requireStroops(value: string | undefined, what: string): bigint {
+  if (value === undefined || !/^\d+$/.test(value)) {
+    throw new Error(`The ${what} amount must be a non-negative integer string.`);
+  }
+  const amount = BigInt(value);
+  if (amount <= 0n) {
+    throw new Error(`The ${what} amount must be positive.`);
+  }
+  return amount;
+}
 
 /** Pulls the single transaction hash out of a PoolExecuteResult. */
 function requireTxHash(result: SdkPoolExecuteResult): string {
@@ -372,6 +405,32 @@ function entryMatchesKeys(entry: SdkRecipientEntry, keys: SdkUserPublicKeys): bo
 }
 
 /**
+ * Syncs the local index, retrying transient failures.
+ *
+ * The SDF public RPC is load-balanced, and nodes can disagree about the
+ * events index's oldest retained ledger (a rebuilt node briefly served a
+ * truncated range). A sync that starts at our deployment ledger then fails
+ * with an RPC sync gap on one node succeeds on the next request, routed to
+ * a healthy one — so one bounded retry converts a hard op failure into a
+ * one-round-trip delay.
+ */
+async function syncWithRetry(client: SdkClient, attempts = 3): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      await client.sync();
+      return;
+    } catch (cause) {
+      lastError = cause;
+      if (attempt + 1 < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+      }
+    }
+  }
+  throw lastError;
+}
+
+/**
  * Waits until the local registry index reflects this wallet's entry.
  *
  * Best-effort with a bounded budget: on-chain the registration already
@@ -398,15 +457,42 @@ async function waitForRegistration(
   }
 }
 
+/**
+ * Serializes SPP operations.
+ *
+ * The runtime is ONE session (module-global client/account/pool) and the SDK
+ * is not re-entrant: concurrent execs would race `ensureRuntime`/`resetRuntime`
+ * rebinding the session under an in-flight proof, and N concurrent
+ * transfer/withdraw ops would spawn N concurrent Groth16 provers (hundreds of
+ * MB each). Every op — reads included — runs one at a time, in arrival order;
+ * a failure in one op never poisons the queue for the next.
+ */
+let execQueue: Promise<unknown> = Promise.resolve();
+
 /** Executes one SPP op on behalf of the background. Throws on failure. */
-export async function executeSppOp(
+export function executeSppOp(
   op: SppExecOp,
   payload: { address: string; amountStroops?: string; to?: string },
 ): Promise<unknown> {
   if (typeof payload.address !== 'string' || payload.address.length === 0) {
-    throw new Error('The SPP operation is missing the wallet address.');
+    return Promise.reject(new Error('The SPP operation is missing the wallet address.'));
   }
 
+  const run = () => runSppOpNow(op, payload);
+  const result = execQueue.then(run, run);
+  // The queue tail swallows outcomes: the NEXT op must run whether this one
+  // succeeded or failed (the result itself still rejects for its caller).
+  execQueue = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
+async function runSppOpNow(
+  op: SppExecOp,
+  payload: { address: string; amountStroops?: string; to?: string },
+): Promise<unknown> {
   const stopKeepalive = startKeepalive();
   try {
     await ensureRuntime(payload.address);
@@ -419,7 +505,7 @@ export async function executeSppOp(
         // Catch the local index up first: balances and the registry entry are
         // only as fresh as the last ingested event, and a status read right
         // after a money op must reflect it.
-        await client.sync();
+        await syncWithRetry(client);
         const [balance, contracts, keys, lookup] = await Promise.all([
           pool.balance(),
           client.allContractsData(),
@@ -444,7 +530,7 @@ export async function executeSppOp(
       }
       case 'sync': {
         if (client === null) throw new Error('The SPP runtime is not ready.');
-        await client.sync();
+        await syncWithRetry(client);
         return { ok: true };
       }
       case 'register': {
@@ -459,8 +545,7 @@ export async function executeSppOp(
       }
       case 'deposit': {
         if (pool === null) throw new Error('The SPP runtime is not ready.');
-        const amount = BigInt(payload.amountStroops ?? '');
-        if (amount <= 0n) throw new Error('The deposit amount must be positive.');
+        const amount = requireStroops(payload.amountStroops, 'deposit');
         const result = await pool.deposit(amount);
         return { txHash: requireTxHash(result), amountStroops: amount.toString() };
       }
@@ -469,9 +554,8 @@ export async function executeSppOp(
         // Spending notes requires the just-created ones to be indexed: sync
         // first, or a transfer immediately after a deposit reports "no
         // spendable notes" even though the funds are there.
-        await client.sync();
-        const amount = BigInt(payload.amountStroops ?? '');
-        if (amount <= 0n) throw new Error('The transfer amount must be positive.');
+        await syncWithRetry(client);
+        const amount = requireStroops(payload.amountStroops, 'transfer');
         const to = payload.to;
         if (typeof to !== 'string' || to.length === 0) {
           throw new Error('A private transfer needs a recipient address.');
@@ -482,9 +566,8 @@ export async function executeSppOp(
       case 'withdraw': {
         if (pool === null || client === null) throw new Error('The SPP runtime is not ready.');
         // Same as transfer: the notes being spent must be locally visible.
-        await client.sync();
-        const amount = BigInt(payload.amountStroops ?? '');
-        if (amount <= 0n) throw new Error('The withdraw amount must be positive.');
+        await syncWithRetry(client);
+        const amount = requireStroops(payload.amountStroops, 'withdraw');
         const result = await pool.withdraw(amount);
         return { txHash: requireTxHash(result), amountStroops: amount.toString() };
       }

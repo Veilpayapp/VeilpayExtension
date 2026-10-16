@@ -51,6 +51,16 @@ export async function closeIdleSppHost(): Promise<void> {
  * already closed it; creation is idempotent when it already exists).
  */
 export async function ensureSppOffscreenDocument(): Promise<void> {
+  // Prefer the structured probe: matching Chrome's "Only a single offscreen
+  // document may be created" error text breaks the moment the wording
+  // changes (a reworded error would look fatal and hard-fail every SPP op).
+  // getContexts is Chrome 116+; where absent, fall through to creation.
+  if (typeof chrome.runtime.getContexts === 'function') {
+    const contexts = await chrome.runtime
+      .getContexts({ contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT] })
+      .catch(() => []);
+    if (contexts.length > 0) return;
+  }
   try {
     await chrome.offscreen.createDocument({
       url: 'offscreen.html',
@@ -58,8 +68,9 @@ export async function ensureSppOffscreenDocument(): Promise<void> {
       justification: 'Host the Stellar Private Payments WASM and worker runtime (privacy pool).',
     });
   } catch (cause) {
-    // "Only a single offscreen document may be created" means it already
-    // exists — that is the success case here. Anything else is fatal.
+    // The probe can race a concurrent creation; "Only a single offscreen
+    // document may be created" means it exists — that is the success case
+    // here. Anything else is fatal.
     const message = cause instanceof Error ? cause.message : String(cause);
     if (!message.includes('Only a single offscreen')) {
       throw new ProtocolError(
@@ -75,6 +86,20 @@ export async function ensureSppOffscreenDocument(): Promise<void> {
  *
  * Errors keep their protocol code (VAULT_LOCKED) when the host flagged one;
  * everything else surfaces as TX_REJECTED with the SDK's display-safe message.
+ *
+ * ACCEPTED RESIDUAL RISK (documented, deliberate): `runtime.sendMessage` is
+ * broadcast to every extension context and Chrome resolves the sender's
+ * callback with the FIRST `sendResponse` — so a compromised extension page
+ * could race a forged response ahead of the offscreen host's real one (fake
+ * balances, a masked success, or a bogus signature that merely fails the op).
+ * The request direction is immune (the host's listener only accepts the
+ * Chrome-stamped background worker), and the attacker class that can exploit
+ * the response race — code running in our own pages — already controls every
+ * pixel the user sees, so no integrity the control plane could add would
+ * exceed the UI's own. No path to key compromise or theft exists: signatures
+ * cannot be forged, only wasted. Moving the replies to explicit
+ * sender-gated result messages would close it; revisit if the control plane
+ * ever carries data the UI does not itself render.
  */
 export async function runSppOp(
   op: SppExecOp,
@@ -91,7 +116,12 @@ export async function runSppOp(
     payload,
   })) as SppExecResponse | undefined;
 
-  if (response === undefined || typeof response !== 'object' || !('ok' in response)) {
+  if (
+    response === undefined ||
+    response === null ||
+    typeof response !== 'object' ||
+    !('ok' in response)
+  ) {
     throw new ProtocolError('INTERNAL', 'The privacy pool runtime did not answer.');
   }
   if (!response.ok) {

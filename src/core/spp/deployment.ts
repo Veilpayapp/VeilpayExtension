@@ -60,7 +60,25 @@ export interface SppContractConfig {
   rpcUrl: string;
 }
 
-export const SPP_CONTRACT_CONFIG: SppContractConfig = {
+/**
+ * Deeply freezes the deployment config.
+ *
+ * Every contract id is a compile-time literal, so a compromised network
+ * response cannot redirect pool operations — but a runtime bug (or injected
+ * code) mutating the shared object could. Freezing makes any such write
+ * fail loudly instead of silently repointing money movement.
+ */
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object') {
+    Object.freeze(value);
+    for (const key of Object.keys(value as Record<string, unknown>)) {
+      deepFreeze((value as Record<string, unknown>)[key]);
+    }
+  }
+  return value;
+}
+
+export const SPP_CONTRACT_CONFIG: SppContractConfig = deepFreeze({
   network: 'testnet',
   kdf_domain: 'Veilpay',
   deployer: 'GAZTPL3VGFXJZSR6JOP67EEJRBVNZVQ2WF2HJ5GAPK6E74LDW524NHV7',
@@ -85,10 +103,21 @@ export const SPP_CONTRACT_CONFIG: SppContractConfig = {
   ],
   networkPassphrase: SPP_NETWORK_PASSPHRASE,
   rpcUrl: SPP_RPC_URL,
-};
+});
 
 /** The pool the wallet operates on (the deployment's single enabled pool). */
 export const SPP_POOL_CONTRACT_ID: string = SPP_CONTRACT_CONFIG.pools[0]!.poolContractId;
 
 /** Display symbol for the pooled asset presentation ("private XLM"). */
 export const SPP_ASSET_SYMBOL = 'pXLM';
+
+/**
+ * The exact string the SDK asks the wallet to sign to derive the pool's
+ * privacy keys ("Privacy Pool Key Derivation [v2] (<kdf_domain>)" — the
+ * template is baked into the vendored SDK's WASM, the domain is OUR config's
+ * `kdf_domain`). The signer bridge signs this message and NOTHING else: the
+ * signature IS the note secret's seed, so an arbitrary-message oracle would
+ * hand out account-ownership proofs (SEP-53 verifiable) for any string an
+ * attacker chose.
+ */
+export const SPP_KEY_DERIVATION_MESSAGE: string = `Privacy Pool Key Derivation [v2] (${SPP_CONTRACT_CONFIG.kdf_domain})`;

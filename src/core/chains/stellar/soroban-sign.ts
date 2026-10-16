@@ -28,6 +28,12 @@ import { encodeStellarAddress } from '@/core/chains/stellar/transaction';
 const ENVELOPE_TYPE_TX = 2;
 
 /**
+ * EnvelopeType tag for the Soroban authorization arm of a `HashIdPreimage`
+ * (ENVELOPE_TYPE_SOROBAN_AUTHORIZATION = 5).
+ */
+const ENVELOPE_TYPE_SOROBAN_AUTHORIZATION = 5;
+
+/**
  * Byte length of one DecoratedSignature:
  *   hint (opaque[4], fixed) + signature (opaque<64>, 4-byte length + 64 bytes).
  */
@@ -98,10 +104,20 @@ function concat(arrays: Uint8Array[]): Uint8Array {
  * TRUE count sits at `body.length − 4 − 72·count`. Candidate counts are scanned
  * from the end and validated against their own position; for well-formed
  * envelopes the true count always validates, and a false positive requires
- * signature bytes that coincidentally encode a matching count (~2⁻³² per
- * candidate). The unsigned envelopes the SPP SDK produces carry zero
- * signatures (the auth entry signatures live inside the operation), for which
- * the trailing bytes are the Transaction's `ext v=0` plus an empty vector.
+ * bytes in the *transaction* body that coincidentally encode a matching
+ * count at exactly the right offset.
+ *
+ * HONESTY OF THE SAFETY ARGUMENT: that coincidence is not 2⁻³² for the
+ * zero-signature case — the candidate position then lies inside attacker-
+ * influenceable transaction bytes, not signature bytes, so a crafted
+ * envelope CAN steer the split. Safety therefore does NOT rest on this
+ * heuristic alone; it rests on the layers around it: (1) only the trusted,
+ * vendored SPP SDK ever supplies envelopes (the internal control plane's
+ * sender checks keep every other context out), (2) the source-account pin in
+ * `signSorobanTransactionEnvelope` refuses envelopes not paid for by this
+ * wallet, and (3) a mis-split produces a mangled envelope the network
+ * rejects (fail-closed, no valid transaction signed for an attacker-chosen
+ * body that the wallet did not already control).
  */
 function splitEnvelopeBody(body: Uint8Array): { tx: Uint8Array; signatureCount: number } {
   let best = -1;
@@ -134,6 +150,11 @@ function splitEnvelopeBody(body: Uint8Array): { tx: Uint8Array; signatureCount: 
  * (networkId || nonce || expiration || invocation); the SDK patches the
  * signature into the auth entry's address credentials itself.
  *
+ * SECURITY GATE (see `assertAuthPreimageBoundToNetwork`): unlike a
+ * transaction, a preimage's network binding is INSIDE the signed payload,
+ * so the caller must pin it explicitly — the background does, before
+ * calling this.
+ *
  * @returns the base64 64-byte Ed25519 signature.
  */
 export function signSorobanAuthPreimage(preimageB64: string, seed: Uint8Array): string {
@@ -148,14 +169,126 @@ export function signSorobanAuthPreimage(preimageB64: string, seed: Uint8Array): 
   return bytesToBase64(signature);
 }
 
+/** Upper bound on an acceptable auth-entry preimage (XDR of one invocation). */
+const MAX_AUTH_PREIMAGE_BYTES = 8192;
+
 /**
- * `signTransaction` — appends the wallet's DecoratedSignature to an unsigned
- * v1 TransactionEnvelope and returns the signed envelope.
+ * SECURITY GATE for the SPP signer bridge's auth-entry arm: the preimage a
+ * wallet signs must be a `HashIdPreimage::SorobanAuthorization` bound to the
+ * pool's network.
+ *
+ * A preimage embeds its `networkId` (sha256 of the passphrase) INSIDE the
+ * signed bytes — unlike `signSorobanTransactionEnvelope`, where the passphrase
+ * is a separate argument. Without this gate, a handover of arbitrary base64
+ * would make the wallet's key a signing oracle for Soroban authorizations on
+ * ANY network (a mainnet-networkId preimage would authorize attacker-chosen
+ * contract invocations as this wallet on mainnet, while every other arm of
+ * the signer bridge is pinned to the pool's testnet).
+ *
+ * Layout checked: uint32 discriminant = 5 (ENVELOPE_TYPE_SOROBAN_AUTHORIZATION)
+ * followed by the 32-byte networkId hash. The invocation body that follows is
+ * not parsed — the discriminant plus the network pin already confine the
+ * oracle to pool-legitimate, pool-network preimages, and a malformed body
+ * simply yields a signature the network rejects.
+ *
+ * @throws a display-safe error when the preimage is not a Soroban
+ *   authorization preimage for `networkPassphrase`'s network.
+ */
+export function assertAuthPreimageBoundToNetwork(
+  preimageB64: string,
+  networkPassphrase: string,
+): void {
+  const preimage = base64ToBytes(preimageB64);
+  if (preimage.length < 36 || preimage.length > MAX_AUTH_PREIMAGE_BYTES) {
+    throw new Error('The authorization preimage has an invalid length.');
+  }
+  const type = readUint32(preimage, 0);
+  if (type !== ENVELOPE_TYPE_SOROBAN_AUTHORIZATION) {
+    throw new Error(
+      `Expected a Soroban authorization preimage (type 5), got type ${type}.`,
+    );
+  }
+  const expectedNetworkId = sha256(new TextEncoder().encode(networkPassphrase));
+  if (!bytesEqual(preimage.subarray(4, 36), expectedNetworkId)) {
+    throw new Error('The authorization entry targets a different network than the pool.');
+  }
+}
+
+/**
+ * Parses the ed25519 public key of a v1 envelope's `sourceAccount`.
+ *
+ * Layout after the 4-byte envelope type tag: `MuxedAccount` — a uint32
+ * discriminant (0 = `KEY_ED25519`, 32-byte key; 1 = `MUXED_ED25519`, 8-byte
+ * id then the 32-byte key). Anything else is rejected.
+ */
+export function envelopeSourceAccountKey(envelopeB64: string): Uint8Array {
+  const envelope = base64ToBytes(envelopeB64);
+  if (envelope.length < 8) {
+    throw new Error('Transaction envelope is too short.');
+  }
+  const type = readUint32(envelope, 0);
+  if (type !== ENVELOPE_TYPE_TX) {
+    throw new Error(`Expected a v1 transaction envelope (type 2), got type ${type}.`);
+  }
+  const accountType = readUint32(envelope, 4);
+  if (accountType === 0) {
+    if (envelope.length < 40) {
+      throw new Error('Transaction envelope is too short for an ed25519 source account.');
+    }
+    return envelope.subarray(8, 40);
+  }
+  if (accountType === 1) {
+    if (envelope.length < 48) {
+      throw new Error('Transaction envelope is too short for a muxed source account.');
+    }
+    return envelope.subarray(16, 48);
+  }
+  throw new Error(`Unsupported transaction source account type ${accountType}.`);
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * SECURITY GATE for the SPP signer bridge: the envelope a wallet signs on
+ * the SDK's behalf must be PAID FOR by that wallet's own account.
+ *
+ * The only legitimate caller of `signSorobanTransactionEnvelope` through the
+ * control plane is the vendored SPP SDK (which always sources its envelopes
+ * from the bound wallet), but a compromised or buggy SDK could otherwise
+ * hand over an arbitrary transaction — e.g. a classic PAYMENT out of the
+ * wallet — and have it signed as if it were a pool operation. The background
+ * calls this before signing; cosigning foreign transactions (legitimate
+ * Stellar behavior) stays available to callers that hold the key directly.
+ *
+ * @throws a display-safe error when the envelope's source account does not
+ *   match the `seed`'s public key.
+ */
+export function assertEnvelopeSourcedFrom(envelopeB64: string, seed: Uint8Array): void {
+  if (seed.length !== 32) {
+    throw new Error(`Stellar private key must be 32 bytes, got ${seed.length}.`);
+  }
+  if (!bytesEqual(envelopeSourceAccountKey(envelopeB64), ed25519.getPublicKey(seed))) {
+    throw new Error('The pool transaction is not sourced from this wallet\u2019s account.');
+  }
+}
+
+/**
+ * `signTransaction` — appends the wallet's DecoratedSignature to a v1
+ * TransactionEnvelope and returns the signed envelope.
  *
  * The signature is over the standard Stellar signature payload:
  *   sha256(networkId || uint32(ENVELOPE_TYPE_TX) || transaction XDR)
  * — the same pre-image the classic payment path signs, so a transaction is
- * bound to the network whose passphrase is passed in.
+ * bound to the network whose passphrase is passed in. This is a general
+ * Stellar signer (cosigning is fine); the wallet-trust policy — "only
+ * envelopes sourced from this account" — is `assertEnvelopeSourcedFrom`,
+ * applied by the background at the control-plane boundary.
  *
  * @param envelopeB64 - base64 XDR of the unsigned v1 envelope.
  * @param seed - the 32-byte Ed25519 seed of the signing Stellar account.
