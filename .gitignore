@@ -1,5 +1,8 @@
 node_modules/
-dist/
+# Root-anchored: the extension build output only. third_party/spp-sdk/dist
+# (the vendored WASM SDK) is TRACKED so fresh checkouts and CI can build —
+# an unanchored "dist/" would ignore it and break every clean build.
+/dist/
 build/
 .dist/
 *.crx
