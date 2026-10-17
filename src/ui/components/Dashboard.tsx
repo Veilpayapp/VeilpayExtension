@@ -215,9 +215,23 @@ export function Dashboard({
     if (!activeAccount) return;
     setFaucetLoading(true);
     setFaucetMessage(null);
+    let clearAfterMs = 3000;
     try {
       const res = await requestFaucet(activeAccount.chain, activeAccount.address);
-      if (res.ok) {
+      if (res.ok && res.txHash) {
+        // Funded on-chain (Stellar Friendbot, a successful Solana airdrop):
+        // the balance lands within seconds.
+        setFaucetMessage('Testnet funds on the way');
+        void loadAllBalances();
+      } else if (res.ok && res.faucetUrl) {
+        // EVM faucets (and a rate-limited Solana airdrop) need the user in a
+        // browser: open the pre-filled faucet page — the funds arrive only
+        // after the user completes it there. Claiming "requested" here would
+        // leave the user waiting for money that never comes on its own.
+        chrome.tabs?.create({ url: res.faucetUrl, active: true });
+        setFaucetMessage('Faucet opened in a new tab — finish it there');
+        clearAfterMs = 6000;
+      } else if (res.ok) {
         setFaucetMessage('Funds requested!');
         void loadAllBalances();
       } else {
@@ -227,7 +241,7 @@ export function Dashboard({
       setFaucetMessage('Faucet failed');
     } finally {
       setFaucetLoading(false);
-      setTimeout(() => setFaucetMessage(null), 3000);
+      setTimeout(() => setFaucetMessage(null), clearAfterMs);
     }
   };
 
