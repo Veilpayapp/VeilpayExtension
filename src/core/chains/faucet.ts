@@ -121,7 +121,9 @@ function evmFaucetUrlFor(networkId: string, address: string): string {
     case 'evm:bsc-chapel':
       return `https://testnet.bnbchain.org/faucet-smart`;
     case 'evm:avalanche-fuji':
-      return `https://fauc.avax.network/?address=${encodeURIComponent(address)}`;
+      // faucet.avax.network no longer resolves in DNS; the Core Wallet
+      // faucet page is the live one (verified 2026-10-17).
+      return `https://faucet.avax.network/?address=${encodeURIComponent(address)}`;
     default:
       // Sepolia and any other EVM testnet default to the Sepolia faucet.
       return `https://sepoliafaucet.com/?address=${encodeURIComponent(address)}`;
@@ -145,7 +147,11 @@ async function solanaAirdrop(address: string, networkId: string): Promise<string
       jsonrpc: '2.0',
       id: 1,
       method: 'requestAirdrop',
-      params: [address, SOLANA_FAUCET_AMOUNT_lamports.toString()],
+      // Lamports must be a JSON NUMBER: the public Solana RPCs reject a
+      // string here ("invalid type: string, expected u64"), which used to
+      // make every automatic airdrop fail into the web-faucet fallback.
+      // 0.1 SOL is far inside the safe-integer range, so Number() is exact.
+      params: [address, Number(SOLANA_FAUCET_AMOUNT_lamports)],
     }),
   });
   if (!res.ok) {

@@ -31,7 +31,10 @@ describe('requestTestnetFaucet', () => {
     };
     expect(body.method).toBe('requestAirdrop');
     expect(body.params[0]).toBe('11111111111111111111111111111111');
-    expect(body.params[1]).toBe(SOLANA_FAUCET_AMOUNT_lamports.toString());
+    // Lamports ride as a JSON NUMBER: the public Solana RPCs reject string
+    // amounts ("invalid type: string, expected u64").
+    expect(body.params[1]).toBe(Number(SOLANA_FAUCET_AMOUNT_lamports));
+    expect(typeof body.params[1]).toBe('number');
   });
 
   it('falls back to the Solana web faucet when the automatic airdrop fails', async () => {
