@@ -21,6 +21,7 @@ import { AddressBookPicker } from '@/ui/components/AddressBookPicker';
 import { CameraSetupCard } from '@/ui/components/CameraSetupCard';
 import { PrivacyView } from '@/ui/components/PrivacyView';
 import { baseToDecimal, nativeDecimalsFor } from '@/ui/lib/format';
+import { runViewTransition, viewDirection, type ViewId } from '@/ui/lib/view-transition';
 import { networkFor, networkLabel } from '@/ui/components/Dashboard';
 import { vaultExists } from '@/core/vault/storage';
 import type { IndexerTx } from '@/core/chains/indexer-service';
@@ -141,7 +142,26 @@ export default function App() {
   const [resetConfirm, setResetConfirm] = useState(false);
 
   // Send / receive / import / privacy view
-  const [view, setView] = useState<'accounts' | 'send' | 'receive' | 'import' | 'privacy'>('accounts');
+  const [view, setView] = useState<ViewId>('accounts');
+
+  /**
+   * THE way a main view changes: every switch funnels through here so it
+   * gets one consistent, direction-aware motion (browser view transition;
+   * see ui/lib/view-transition). `along` rides extra state updates —
+   * closing a receipt, clearing the selected transaction — inside the same
+   * transition snapshot, so they animate as one step instead of landing
+   * after the motion.
+   */
+  const navigate = (next: ViewId, along?: () => void) => {
+    if (next === view && along === undefined) {
+      setView(next); // already there; no transition to run
+      return;
+    }
+    runViewTransition(viewDirection(view, next), () => {
+      along?.();
+      setView(next);
+    });
+  };
   const [sendTo, setSendTo] = useState('');
   const [sendAmount, setSendAmount] = useState('');
   /** Stellar MEMO_TEXT, sent with the transfer. Lifted here so a scanned
@@ -368,7 +388,7 @@ export default function App() {
 
   const [sendAccount, setSendAccount] = useState<AccountView | null>(null);
 
-  const startSend = (idx: number) => {
+  const startSend = (idx: number, along?: () => void) => {
     const acc = accounts[idx];
     if (acc === undefined) return;
     setSendAccount(acc);
@@ -384,7 +404,7 @@ export default function App() {
     setSendHash(null);
     setSendPrivate(false);
     setSendReceiptTo(null);
-    setView('send');
+    navigate('send', along);
   };
 
   // Convert a Stellar asset selection into a TokenInput (for the unified send
@@ -447,9 +467,9 @@ export default function App() {
     }
   };
 
-  const startReceive = (idx: number) => {
+  const startReceive = (idx: number, along?: () => void) => {
     setReceiveIdx(idx);
-    setView('receive');
+    navigate('receive', along);
   };
 
   /**
@@ -469,7 +489,7 @@ export default function App() {
     setSendMemo(
       enteringFresh || sendMemo.length === 0 ? (result.memo ?? '') : sendMemo,
     );
-    setView('send');
+    if (!enteringFresh) navigate('send');
     setScanModalOpen(false);
   };
 
@@ -489,7 +509,7 @@ export default function App() {
         // Onboarding import: show success screen, then let user proceed
         setStep('success');
       } else {
-        setView('accounts');
+        navigate('accounts');
         void loadAccounts();
       }
     } else {
@@ -608,18 +628,15 @@ export default function App() {
 
   const handleTabSelect = (tab: TacticalTab) => {
     if (tab === 'home') {
-      setSelectedTx(null);
-      setView('accounts');
+      navigate('accounts', () => setSelectedTx(null));
     } else if (tab === 'send') {
       if (accounts.length === 0) return; // nothing to send from; stay put
-      setSelectedTx(null);
-      startSend(0);
+      startSend(0, () => setSelectedTx(null));
     } else if (tab === 'scan') {
       setScanModalOpen(true);
     } else if (tab === 'receive') {
       if (accounts.length === 0) return; // no address to show; stay put
-      setSelectedTx(null);
-      startReceive(0);
+      startReceive(0, () => setSelectedTx(null));
     } else if (tab === 'settings') {
       void chrome.runtime.openOptionsPage();
     }
@@ -658,7 +675,8 @@ export default function App() {
             status: selectedTx.status === 'confirmed' ? 'completed' : selectedTx.status,
             direction,
           }}
-          onBack={() => setSelectedTx(null)}
+          // Drilling into a receipt is "forward"; leaving it returns home.
+          onBack={() => runViewTransition('back', () => setSelectedTx(null))}
         />
       );
     }
@@ -690,7 +708,7 @@ export default function App() {
             onTokenChange={setSendToken}
             onEstimate={handleSendFee}
             onConfirm={() => void handleSendConfirm(sendMemo, sendPrivate)}
-            onBack={() => setView('accounts')}
+            onBack={() => navigate('accounts')}
             onClearError={clearError}
             onOpenScan={() => setScanModalOpen(true)}
             onTabSelect={handleTabSelect}
@@ -711,7 +729,7 @@ export default function App() {
       return (
         <ReceiveView
           account={acc}
-          onBack={() => setView('accounts')}
+          onBack={() => navigate('accounts')}
           onTabSelect={handleTabSelect}
         />
       );
@@ -728,12 +746,12 @@ export default function App() {
           onPass1Change={setImportPass1}
           onPass2Change={setImportPass2}
           onSubmit={handleImportSubmit}
-          onBack={() => setView('accounts')}
+          onBack={() => navigate('accounts')}
         />
       );
     }
     if (view === 'privacy') {
-      return <PrivacyView onBack={() => setView('accounts')} />;
+      return <PrivacyView onBack={() => navigate('accounts')} />;
     }
 
     // Default: Dashboard matching Screenshot 1 & 2
@@ -792,12 +810,12 @@ export default function App() {
             accounts={accounts}
             onSend={startSend}
             onReceive={startReceive}
-            onImport={() => setView('import')}
+            onImport={() => navigate('import')}
             onLock={handleLock}
             onScan={() => setScanModalOpen(true)}
-            onSelectTx={(tx) => setSelectedTx(tx)}
+            onSelectTx={(tx) => runViewTransition('forward', () => setSelectedTx(tx))}
             onSeeAllActivity={() => void chrome.runtime.openOptionsPage()}
-            onPrivacy={() => setView('privacy')}
+            onPrivacy={() => navigate('privacy')}
           />
 
           <ZkResult capability={zkCapability} />
@@ -1434,7 +1452,7 @@ function SendForm({
   }
 
   return (
-    <main className="flex min-h-[600px] w-[400px] flex-col bg-surface-900 text-content-primary animate-fade-in-up">
+    <main className="flex min-h-[600px] w-[400px] flex-col bg-surface-900 text-content-primary">
       {/* Top Header matching Screenshot 4 */}
       <header className="flex shrink-0 items-center justify-between border-b border-surface-800/80 px-4 py-3">
         <button
@@ -2094,7 +2112,7 @@ function ReceiveView({
   };
 
   return (
-    <main className="flex min-h-[600px] w-[400px] flex-col bg-surface-900 text-content-primary animate-fade-in-up">
+    <main className="flex min-h-[600px] w-[400px] flex-col bg-surface-900 text-content-primary">
       {/* Top Header matching Screenshot 5 */}
       <header className="flex shrink-0 items-center justify-between border-b border-surface-800/80 px-4 py-3">
         <button
@@ -2345,7 +2363,7 @@ function ImportWallet({
   onBack: () => void;
 }) {
   return (
-    <main className="flex min-h-[600px] w-[400px] flex-col gap-4 p-4 animate-fade-in-up">
+    <main className="flex min-h-[600px] w-[400px] flex-col gap-4 p-4">
       <header className="flex items-baseline justify-between">
         <h1 className="font-display text-lg font-bold text-content-primary">Veilpay</h1>
         <span className="font-mono text-xs text-content-tertiary">v0.0.1</span>

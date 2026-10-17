@@ -67,3 +67,75 @@
     }
   }
 }
+
+/* ── Main-view transitions (home ⇄ send ⇄ receive …) ─────────────────────
+   Every popup view swap runs inside document.startViewTransition
+   (src/ui/lib/view-transition.ts); these pseudo-element animations ARE the
+   motion the user sees. Duration/curve mirror the motion tokens (base
+   200ms, easeOut) so view travel matches every other entrance.
+
+   Transform + opacity only — no layout, no paint. The outgoing view
+   travels less than the incoming one (16px vs 24px): the foreground
+   reading as faster than the background is what makes the parallax read
+   as depth rather than as two cards swapping. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 200ms;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  animation-fill-mode: both;
+}
+::view-transition-old(root) {
+  animation-name: view-nav-out-forward;
+}
+::view-transition-new(root) {
+  animation-name: view-nav-in-forward;
+}
+/* Going back mirrors the travel, so "back" always moves the same way. */
+:root[data-view-nav='back']::view-transition-old(root) {
+  animation-name: view-nav-out-back;
+}
+:root[data-view-nav='back']::view-transition-new(root) {
+  animation-name: view-nav-in-back;
+}
+
+@keyframes view-nav-in-forward {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+@keyframes view-nav-out-forward {
+  to {
+    opacity: 0;
+    transform: translateX(-16px);
+  }
+}
+@keyframes view-nav-in-back {
+  from {
+    opacity: 0;
+    transform: translateX(-24px);
+  }
+}
+@keyframes view-nav-out-back {
+  to {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+}
+
+/* Reduced motion: gentler, not zero — keep the crossfade (it bridges the
+   swap), drop the travel. The blanket rule above cannot reach these
+   pseudo-elements, so this must exist. */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation-name: view-nav-fade;
+    animation-duration: 120ms;
+    animation-timing-function: ease;
+  }
+}
+@keyframes view-nav-fade {
+  from {
+    opacity: 0;
+  }
+}

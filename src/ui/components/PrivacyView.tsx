@@ -205,7 +205,7 @@ export function PrivacyView({ onBack }: { onBack: () => void }): JSX.Element {
     (mode === 'unshield' && unshieldTooMuch);
 
   return (
-    <main className="flex min-h-[600px] w-[400px] animate-fade-in-up flex-col bg-surface-900 text-content-primary">
+    <main className="flex min-h-[600px] w-[400px] flex-col bg-surface-900 text-content-primary">
       <header className="flex shrink-0 items-center justify-between border-b border-surface-800/80 px-4 py-3">
         <button
           type="button"

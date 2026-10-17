@@ -365,7 +365,7 @@ export function ScanModal({
       aria-modal="true"
       aria-label="Scan QR Code"
     >
-      <div className="w-full max-w-sm rounded-2xl border border-surface-600 bg-surface-900 p-4 shadow-raised flex flex-col gap-4 text-center">
+      <div className="w-full max-w-sm rounded-2xl border border-surface-600 bg-surface-900 p-4 shadow-raised flex flex-col gap-4 text-center animate-scale-in">
         {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
