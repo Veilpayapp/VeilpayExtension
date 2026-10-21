@@ -80,7 +80,7 @@
    as depth rather than as two cards swapping. */
 ::view-transition-old(root),
 ::view-transition-new(root) {
-  animation-duration: 200ms;
+  animation-duration: 260ms;
   animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
   animation-fill-mode: both;
 }
@@ -101,25 +101,41 @@
 @keyframes view-nav-in-forward {
   from {
     opacity: 0;
-    transform: translateX(24px);
+    transform: translateX(36px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
   }
 }
 @keyframes view-nav-out-forward {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
   to {
     opacity: 0;
-    transform: translateX(-16px);
+    transform: translateX(-24px);
   }
 }
 @keyframes view-nav-in-back {
   from {
     opacity: 0;
-    transform: translateX(-24px);
+    transform: translateX(-36px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
   }
 }
 @keyframes view-nav-out-back {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
   to {
     opacity: 0;
-    transform: translateX(16px);
+    transform: translateX(24px);
   }
 }
 
@@ -137,5 +153,8 @@
 @keyframes view-nav-fade {
   from {
     opacity: 0;
+  }
+  to {
+    opacity: 1;
   }
 }
