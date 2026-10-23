@@ -6,6 +6,7 @@ import { bytesToHex } from '@noble/hashes/utils';
 import {
   deriveAssociatedTokenAddress,
   findProgramAddress,
+  looksLikeTransactionMessage,
   parseSolanaTransaction,
   signSolanaMessage,
   signSolanaSplTransfer,
@@ -398,5 +399,49 @@ describe('Solana dapp message signing', () => {
 
   it('rejects an invalid private key length', () => {
     expect(() => signSolanaMessage(new Uint8Array(4), new Uint8Array(16))).toThrow('32 bytes');
+  });
+});
+
+describe('signMessage transaction-oracle detection', () => {
+  // The bare-ed25519 signMessage convention means a "message" that is really
+  // a serialized transaction message would produce a broadcastable signature.
+  // The detector is what stops signMessage from being a drain oracle.
+
+  function transferMessage(): Uint8Array {
+    const signed = signSolanaTransfer({
+      from: FROM_ADDRESS,
+      to: TO_ADDRESS,
+      lamports: 1000n,
+      blockhash: BLOCKHASH,
+    }, PRIVATE_KEY);
+    const bytes = Uint8Array.from(atob(signed.raw), (c) => c.charCodeAt(0));
+    return bytes.subarray(65); // strip [sig count][64-byte signature]
+  }
+
+  it('flags a real transaction message naming the wallet as signer', () => {
+    expect(looksLikeTransactionMessage(transferMessage(), FROM_ADDRESS)).toBe(true);
+  });
+
+  it('does not flag the same message for a non-signer wallet', () => {
+    expect(looksLikeTransactionMessage(transferMessage(), TO_ADDRESS)).toBe(false);
+  });
+
+  it('does not flag ordinary text messages', () => {
+    const message = new TextEncoder().encode('Sign in to example.com at 2024-01-01');
+    expect(looksLikeTransactionMessage(message, FROM_ADDRESS)).toBe(false);
+  });
+
+  it('does not flag a transaction message with trailing garbage (not node-acceptable)', () => {
+    const message = transferMessage();
+    const padded = new Uint8Array(message.length + 1);
+    padded.set(message, 0);
+    padded[message.length] = 0xff;
+    expect(looksLikeTransactionMessage(padded, FROM_ADDRESS)).toBe(false);
+  });
+
+  it('does not flag truncated or empty buffers', () => {
+    const message = transferMessage();
+    expect(looksLikeTransactionMessage(message.subarray(0, 10), FROM_ADDRESS)).toBe(false);
+    expect(looksLikeTransactionMessage(new Uint8Array(0), FROM_ADDRESS)).toBe(false);
   });
 });

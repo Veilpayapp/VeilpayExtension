@@ -62,11 +62,19 @@ export interface InvalidChallenge {
 export type ValidationResult = ValidChallenge | InvalidChallenge;
 
 /**
+ * The replay guard lives in service-worker memory, which MV3 evicts routinely
+ * (~30 s idle). A challenge accepted for an unbounded future window could be
+ * re-submitted after any restart and signed again. Capping the validity window
+ * bounds that replay surface to minutes regardless of the server's own expiry.
+ */
+export const MAX_CHALLENGE_TTL_MS = 15 * 60_000;
+
+/**
  * Validates an x402 challenge before any signing occurs.
  *
  * Checks, in order:
  *   1. Zod schema conformance (type-level validation)
- *   2. Expiry is in the future
+ *   2. Expiry is in the future, and no further than MAX_CHALLENGE_TTL out
  *   3. Nonce is not a replay
  *   4. payTo is a valid 0x-prefixed EVM address
  *   5. Resource origin matches the page origin (no cross-origin payment redirection)
@@ -89,9 +97,12 @@ export function validateChallenge(
 
   const challenge = parsed.data;
 
-  // 1. Expiry
+  // 1. Expiry — in the future, and not unreasonably far out (see the TTL note).
   if (now >= challenge.expiry) {
     return { valid: false, reason: 'The challenge has expired.' };
+  }
+  if (challenge.expiry - now > MAX_CHALLENGE_TTL_MS) {
+    return { valid: false, reason: 'The challenge validity window is too long.' };
   }
 
   // 2. Nonce replay
@@ -104,10 +115,14 @@ export function validateChallenge(
     return { valid: false, reason: 'The recipient address is not a valid EVM address.' };
   }
 
-  // 4. Resource origin — must match the page origin
+  // 4. Resource origin — must match the page origin. Resolving against the
+  //    page origin (rather than parsing bare) classifies every form correctly:
+  //    "/path" stays same-origin, "https://other" mismatches, and the
+  //    protocol-relative "//other/path" resolves CROSS-origin — the old
+  //    parse-without-base let "//evil.tld" through as "implicitly same-origin".
   if (pageOrigin !== null) {
     try {
-      const resourceUrl = new URL(challenge.resource);
+      const resourceUrl = new URL(challenge.resource, pageOrigin);
       if (resourceUrl.origin !== pageOrigin) {
         return {
           valid: false,
@@ -115,11 +130,7 @@ export function validateChallenge(
         };
       }
     } catch {
-      // If the resource is a relative path, it's implicitly same-origin.
-      // Absolute URLs must match.
-      if (challenge.resource.startsWith('http://') || challenge.resource.startsWith('https://')) {
-        return { valid: false, reason: 'The resource URL could not be parsed.' };
-      }
+      return { valid: false, reason: 'The resource URL could not be parsed.' };
     }
   }
 

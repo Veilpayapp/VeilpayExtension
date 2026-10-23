@@ -45,6 +45,11 @@ export function viewDirection(from: ViewId, to: ViewId): 'forward' | 'back' {
 
 /** The browser API shape this module needs (Chrome 111+). */
 interface ViewTransitionLike {
+  /** Rejects when the update callback throws. */
+  updateCallbackDone?: Promise<void>;
+  /** Rejects when the transition is skipped before its first frame. */
+  ready?: Promise<void>;
+  /** Rejects when the transition is skipped or aborted at any point. */
   finished: Promise<void>;
 }
 type StartViewTransition = (update: () => void) => ViewTransitionLike;
@@ -90,5 +95,13 @@ export function runViewTransition(
       delete doc.documentElement.dataset.viewNav;
     }
   };
+  // A skipped/aborted transition rejects EVERY promise on the transition
+  // object — Chrome aborts when the popup viewport resizes mid-motion, which
+  // a popup does whenever the incoming view changes height. `finished` drives
+  // the cleanup; the other two rejections carry nothing actionable (the view
+  // swap already committed) and are observed here purely so they do not
+  // surface as "Uncaught (in promise) InvalidStateError" console noise.
+  transition.updateCallbackDone?.catch(() => undefined);
+  transition.ready?.catch(() => undefined);
   transition.finished.then(clearDirection, clearDirection);
 }

@@ -1,9 +1,12 @@
 /**
- * VAP audit ledger — append-only, hash-chained, locally signed.
+ * VAP audit ledger — append-only and hash-chained (NOT signed).
  *
  * Every grant-lifecycle and operation-outcome transition writes exactly one
  * entry (VAP-05). `entryHash` chains each entry to its predecessor, so a
- * tampered or reordered history is detectable by `verifyAuditChain`.
+ * tampered or reordered history is detectable by `verifyAuditChain`. The chain
+ * is keyed by nothing: it proves internal consistency, not authenticity —
+ * undetectable tail truncation requires an external anchor, which is a
+ * deliberate future step, not a claim this code makes.
  *
  * Redaction rule (VAP-11): amounts and addresses may be logged; private keys,
  * signatures, mnemonics, and nullifiers are never logged. Callers pass a

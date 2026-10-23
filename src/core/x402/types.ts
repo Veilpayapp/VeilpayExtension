@@ -13,8 +13,10 @@ import { z } from 'zod';
 export const X402Challenge = z.object({
   /** Scheme identifier. Always "x402" for this implementation. */
   scheme: z.literal('x402'),
-  /** Amount in base units as a decimal string (bigint cannot cross the bus). */
-  amount: z.string().regex(/^\d+$/, 'Amount must be a non-negative integer.'),
+  /** Amount in base units as a decimal string (bigint cannot cross the bus).
+   *  Capped at 78 digits (uint256's maximum) so a hostile challenge cannot
+   *  force a huge BigInt conversion in the service worker. */
+  amount: z.string().max(78).regex(/^\d+$/, 'Amount must be a non-negative integer.'),
   /** Asset ticker, e.g. "ETH", "USDC". */
   asset: z.string().min(1).max(16),
   /** Chain the payment settles on. EVM only for the first slice. */

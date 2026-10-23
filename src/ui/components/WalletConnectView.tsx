@@ -78,7 +78,10 @@ export function WalletConnectView() {
   };
 
   const handleResolveRequest = async (action: 'approve' | 'deny') => {
-    await wcResolveRequest(action);
+    // Bind the decision to the exact request being displayed — if another
+    // request arrived in between, the background refuses rather than
+    // approving the wrong one.
+    await wcResolveRequest(action, pendingWcRequest?.requestId);
     await loadWcRequest();
   };
 

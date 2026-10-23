@@ -2,9 +2,16 @@
  * Persisted record contracts for the versioned IndexedDB stores.
  *
  * These are the domain shapes stored in `storage.ts`'s v2 object stores. They
- * are deliberately pure data — no behavior, no vault secrets. The canonical
- * encrypted wallet payload stays in the `vault` store (`VaultRecord`); mnemonic,
- * private keys, PINs, and nullifier preimages never appear in any typed store.
+ * are deliberately pure data — no behavior. The canonical encrypted wallet
+ * payload stays in the `vault` store (`VaultRecord`); mnemonics, private keys,
+ * and PINs never appear in any typed store.
+ *
+ * SECURITY DEBT (Phase 3 blocker): `PrivacyCommitmentRecord.secret` is a note
+ * preimage persisted in PLAINTEXT — a raw IndexedDB/profile dump would expose
+ * every unspent note's spending credential. No code writes this store yet
+ * (scaffolding only). Before any writer ships: encrypt the record with a
+ * vault-derived key, or derive note secrets on demand and persist only the
+ * public commitment.
  */
 
 import type { EncryptedBlob } from './crypto';
@@ -55,8 +62,11 @@ export interface SessionRecord {
   metadata?: unknown;
 }
 
-/** A privacy commitment (Phase 3. The nullifier field is a commitment, NOT a
- *  preimage — preimages never persist in plaintext). */
+/** A privacy commitment (Phase 3 scaffolding — NO LIVE WRITER).
+ *
+ *  WARNING: `secret` is the note's spending preimage and would be stored in
+ *  plaintext — see the module-level SECURITY DEBT note. This shape must not
+ *  gain a writer until the field is encrypted or eliminated. */
 export interface PrivacyCommitmentRecord {
   id: string;
   commitmentId: string;

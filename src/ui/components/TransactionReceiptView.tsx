@@ -89,7 +89,7 @@ export function TransactionReceiptView({
           type="button"
           onClick={onBack}
           aria-label="Back to dashboard"
-          className="flex items-center gap-1.5 font-mono text-xs font-semibold text-content-secondary hover:text-white transition-colors"
+          className="flex items-center gap-1.5 font-mono text-xs font-semibold text-content-secondary hover:text-content-primary transition-colors"
         >
           <Glyph name="arrow-left" className="h-4 w-4" />
           <span>BACK</span>
@@ -129,7 +129,7 @@ export function TransactionReceiptView({
           {heroLabel}
         </span>
         <div
-          className={`mt-1 font-display text-4xl font-extrabold tracking-tight ${received ? 'text-success' : 'text-[#FF5A5A]'}`}
+          className={`mt-1 font-display text-4xl font-extrabold tracking-tight ${received ? 'text-success' : 'text-[#EF4444] dark:text-[#FF5A5A]'}`}
         >
           {sign} {receipt.amount}
         </div>
@@ -139,8 +139,8 @@ export function TransactionReceiptView({
       </div>
 
       {/* Details Card */}
-      <div className="flex-1 rounded-2xl border border-surface-700/60 bg-surface-800/80 p-4 shadow-raised">
-        <div className="flex flex-col divide-y divide-surface-700/60">
+      <div className="flex-1 rounded-2xl border border-surface-600/80 bg-surface-800/80 p-4 shadow-raised">
+        <div className="flex flex-col divide-y divide-surface-600/60">
           {/* FROM */}
           <div className="flex items-center justify-between py-2.5">
             <span className="font-mono text-[10px] font-semibold tracking-wider text-content-tertiary uppercase">
@@ -154,7 +154,7 @@ export function TransactionReceiptView({
                 type="button"
                 onClick={() => copy(receipt.from, setCopiedFrom)}
                 aria-label="Copy sender address"
-                className="text-accent-500 hover:text-accent-400 p-0.5"
+                className="p-1 rounded bg-accent-500/10 text-accent-500 hover:bg-accent-500/20 transition-colors"
               >
                 <Glyph name={copiedFrom ? 'check' : 'copy'} className="h-3.5 w-3.5" />
               </button>
@@ -174,7 +174,7 @@ export function TransactionReceiptView({
                 type="button"
                 onClick={() => copy(receipt.to, setCopiedTo)}
                 aria-label="Copy recipient address"
-                className="text-accent-500 hover:text-accent-400 p-0.5"
+                className="p-1 rounded bg-accent-500/10 text-accent-500 hover:bg-accent-500/20 transition-colors"
               >
                 <Glyph name={copiedTo ? 'check' : 'copy'} className="h-3.5 w-3.5" />
               </button>
@@ -207,7 +207,7 @@ export function TransactionReceiptView({
             <span className="mb-1.5 block font-mono text-[10px] font-semibold tracking-wider text-content-tertiary uppercase">
               TX HASH
             </span>
-            <div className="rounded-lg border border-surface-700 bg-surface-900/90 px-3 py-2 font-mono text-[11px] text-content-secondary break-all">
+            <div className="rounded-lg border border-surface-600 bg-surface-700/80 px-3 py-2 font-mono text-[11px] text-content-secondary break-all">
               {receipt.hash}
             </div>
           </div>
@@ -218,7 +218,7 @@ export function TransactionReceiptView({
           <button
             type="button"
             onClick={() => copy(receipt.hash, setCopiedHash)}
-            className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-accent-500 py-2.5 font-mono text-xs font-bold text-surface-900 shadow-sm transition-transform active:scale-95 hover:bg-accent-400"
+            className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-accent-500 py-2.5 font-mono text-xs font-bold text-white shadow-sm transition-transform active:scale-95 hover:bg-accent-400"
           >
             <Glyph name={copiedHash ? 'check' : 'copy'} className="h-4 w-4" />
             <span>{copiedHash ? 'COPIED' : 'COPY'}</span>
@@ -228,7 +228,7 @@ export function TransactionReceiptView({
             <button
               type="button"
               onClick={() => window.open(explorerUrl, '_blank', 'noopener,noreferrer')}
-              className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-accent-500/80 bg-surface-900/60 py-2.5 font-mono text-xs font-bold text-accent-500 transition-colors hover:bg-accent-500/10 active:scale-95"
+              className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-accent-500 bg-surface-800 py-2.5 font-mono text-xs font-bold text-accent-500 transition-colors hover:bg-accent-500/10 active:scale-95"
             >
               <Glyph name="external" className="h-4 w-4" />
               <span>EXPLORER</span>

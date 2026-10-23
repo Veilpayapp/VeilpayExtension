@@ -189,8 +189,18 @@ export function hashStruct(
   data: Record<string, unknown>,
   types: Record<string, TypedDataField[]>,
 ): Uint8Array {
-  const fields = types[type] ?? [];
-  const encoded = fields.map((field) => encodeField(field.type, data[field.name], types));
+  const fields = types[type];
+  if (fields === undefined) {
+    throw new Error(`EIP-712: unknown type "${type}".`);
+  }
+  const encoded = fields.map((field) => {
+    // A declared field missing from the message must not silently encode as a
+    // zero value — that signs something other than what the dapp displayed.
+    if (data[field.name] === undefined) {
+      throw new Error(`EIP-712: missing field "${field.name}" for ${type}.`);
+    }
+    return encodeField(field.type, data[field.name], types);
+  });
   return keccak_256(concatBytes([typeHash(type, types), ...encoded]));
 }
 
@@ -215,11 +225,34 @@ function encodeField(
     return keccak_256(utf8(value));
   }
 
-  if (type === 'bytes' || /^bytes\d+$/.test(type)) {
+  if (type === 'bytes') {
+    // Dynamic bytes: hashed.
     return keccak_256(bytesValue(value, type));
   }
 
+  const bytesN = /^bytes(\d+)$/.exec(type);
+  if (bytesN !== null) {
+    // Fixed-size bytesN is ATOMIC under EIP-712: the value, left-aligned in a
+    // zero-padded 32-byte word, UNHASHED. Hashing it (the previous behavior)
+    // produces a digest no verifying contract accepts — and it silently
+    // corrupted the `salt: bytes32` domain field.
+    const width = Number(bytesN[1]);
+    if (width < 1 || width > 32) {
+      throw new Error(`EIP-712: invalid width for ${type}.`);
+    }
+    const raw = bytesValue(value, type);
+    if (raw.length !== width) {
+      throw new Error(`EIP-712: ${type} expects exactly ${width} bytes, got ${raw.length}.`);
+    }
+    const out = new Uint8Array(32);
+    out.set(raw, 0);
+    return out;
+  }
+
   if (type === 'bool') {
+    if (typeof value !== 'boolean') {
+      throw new Error(`EIP-712: expected a boolean, got ${typeof value}.`);
+    }
     return integerWord(value ? 1n : 0n, type);
   }
 
@@ -227,12 +260,32 @@ function encodeField(
     return addressWord(value);
   }
 
-  if (/^(u?int)\d*$/.test(type)) {
-    return integerWord(toBigInt(value, type), type);
+  const intMatch = /^(u?)int(\d*)$/.exec(type);
+  if (intMatch !== null) {
+    const signed = intMatch[1] === '';
+    const width = intMatch[2] === '' ? 256 : Number(intMatch[2]);
+    if (width < 8 || width > 256 || width % 8 !== 0) {
+      throw new Error(`EIP-712: invalid integer width for ${type}.`);
+    }
+    const num = toBigInt(value, type);
+    // Width-bound the value: uint8: 300 must throw, not silently encode 300.
+    if (signed) {
+      const min = -(1n << BigInt(width - 1));
+      const max = (1n << BigInt(width - 1)) - 1n;
+      if (num < min || num > max) throw new Error(`EIP-712: value out of range for ${type}.`);
+    } else {
+      if (num < 0n || num >= 1n << BigInt(width)) {
+        throw new Error(`EIP-712: value out of range for ${type}.`);
+      }
+    }
+    return integerWord(num, type);
   }
 
-  // Any remaining type is a struct reference.
-  if (typeof value !== 'object' || value === null) {
+  // Any remaining type must be a declared struct reference.
+  if (types[type] === undefined) {
+    throw new Error(`EIP-712: unknown type "${type}".`);
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error(`EIP-712: expected an object for ${type}.`);
   }
   return hashStruct(type, value as Record<string, unknown>, types);

@@ -54,6 +54,8 @@ describe('GrantApproval', () => {
   });
 
   it('requires the 3s hold before approving (anti-clickjack)', async () => {
+    // Security status loaded: neither PIN nor passkey configured.
+    useWallet.setState({ securityStatus: { pinEnabled: false, webauthnEnabled: false } });
     vi.useFakeTimers();
     const onApprove = vi.fn(async () => undefined);
     render(<GrantApproval request={REQUEST} onApprove={onApprove} onReject={() => {}} />);

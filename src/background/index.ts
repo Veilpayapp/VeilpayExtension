@@ -33,6 +33,7 @@ import {
 import { signTypedData, type TypedData } from '@/core/chains/evm/eip712';
 import {
   deriveAssociatedTokenAddress,
+  looksLikeTransactionMessage,
   parseSolanaTransaction,
   signSolanaMessage,
   signSolanaSplTransfer,
@@ -144,7 +145,7 @@ import {
   createGrant,
   type GrantCaps,
 } from '@/core/vap/grant';
-import { loadSpendWindow, recordSpend, requiresApproval } from '@/core/vap/decision';
+import { loadSpendWindow, recordSpend, requiresApproval, withGrantLock } from '@/core/vap/decision';
 import { requireGrantConfirmation } from '@/core/vap/confirmation';
 import { appendAudit } from '@/core/vap/audit';
 import {
@@ -585,7 +586,24 @@ const handlers: HandlerMap = {
    * shim emits `chainChanged` to the dapp. An unrecognized id fails with
    * CHAIN_UNSUPPORTED, which the shim maps to EIP-1193 4902.
    */
-  'eth.switchChain': async (payload) => {
+  'eth.switchChain': async (payload, ctx) => {
+    // Chain switches redirect where funds are broadcast for EVERY surface, so
+    // an unconnected page must not flip the wallet's network — require the
+    // origin to hold an approved connection first (EIP-3326's wallet-safety
+    // intent; the alternative, a silent global switch for any page, is a
+    // network-confusion attack).
+    const origin = ctx.pageOrigin;
+    if (origin === null) {
+      throw new ProtocolError('ORIGIN_DENIED', 'Could not verify the requesting origin.');
+    }
+    const approved = await getApprovedAddresses(origin);
+    if (approved.length === 0) {
+      throw new ProtocolError(
+        'ORIGIN_DENIED',
+        'Connect this origin before switching chains.'
+      );
+    }
+
     const requestedHex = payload.chainId.toLowerCase().replace(/^0x/, '');
     const requestedId = Number.parseInt(requestedHex, 16);
     if (!Number.isInteger(requestedId) || requestedId <= 0) {
@@ -666,6 +684,17 @@ const handlers: HandlerMap = {
     const approved = await getApprovedAddresses(origin);
     if (approved.length === 0) {
       throw new ProtocolError('ORIGIN_DENIED', 'No accounts approved for this origin.');
+    }
+
+    // A dapp transaction without `to` is a contract deployment — this wallet
+    // does not support those, and silently substituting the sender's own
+    // address would sign a self-send the approval UI displayed as recipient
+    // "—" (display ≠ signed semantics). Reject it honestly.
+    if (payload.tx.to === undefined || payload.tx.to.length === 0) {
+      throw new ProtocolError(
+        'BAD_REQUEST',
+        'A recipient address is required (contract deployment is not supported).'
+      );
     }
 
     // The sender is the dapp's `from` when it named an approved account,
@@ -1012,28 +1041,34 @@ const handlers: HandlerMap = {
     // removing the prompt for low-value payments the user has pre-authorized.
     const grant = await getActiveGrantByOrigin(origin);
     if (grant !== null) {
-      const window = await loadSpendWindow(grant);
-      const decision = requiresApproval(
-        grant,
-        { type: 'x402.pay', amount, chain: 'evm', recipient: challenge.payTo },
-        BigInt(window.amountSpent)
-      );
-      if (decision.action === 'deny') {
-        void appendAudit('op.denied', {
-          origin,
-          chain: 'evm',
-          amount: challenge.amount,
-          nonce: challenge.nonce,
-          resource: challenge.resource,
-          grantId: grant.id,
-          reason: decision.reason,
-        });
-        throw new ProtocolError(
-          'X402_INVALID_CHALLENGE',
-          `Payment denied by grant policy (${decision.reason}).`
+      // The whole check→sign→debit sequence runs under the per-grant lock:
+      // without it, two concurrent payments both pass the window check against
+      // the same stale total and both settle, exceeding maxPerWindow.
+      const settledHeader = await withGrantLock(grant.id, async (): Promise<string | null> => {
+        const window = await loadSpendWindow(grant);
+        const decision = requiresApproval(
+          grant,
+          { type: 'x402.pay', amount, chain: 'evm', recipient: challenge.payTo },
+          BigInt(window.amountSpent)
         );
-      }
-      if (decision.action === 'auto') {
+        if (decision.action === 'deny') {
+          void appendAudit('op.denied', {
+            origin,
+            chain: 'evm',
+            amount: challenge.amount,
+            nonce: challenge.nonce,
+            resource: challenge.resource,
+            grantId: grant.id,
+            reason: decision.reason,
+          });
+          throw new ProtocolError(
+            'X402_INVALID_CHALLENGE',
+            `Payment denied by grant policy (${decision.reason}).`
+          );
+        }
+        if (decision.action !== 'auto') {
+          return null; // human prompt below, outside the lock
+        }
         const { header } = await vault.withAccount('evm', 0, async (account) => {
           return signPaymentPayload(challenge, account.privateKey, account.address);
         });
@@ -1047,7 +1082,10 @@ const handlers: HandlerMap = {
           grantId: grant.id,
           approvedBy: 'grant',
         });
-        return { paymentHeader: header };
+        return header;
+      });
+      if (settledHeader !== null) {
+        return { paymentHeader: settledHeader };
       }
       // decision.action === 'required': fall through to the prompt path.
     }
@@ -1108,7 +1146,9 @@ const handlers: HandlerMap = {
       resource: challenge.resource,
       approvedBy: 'user',
     });
-    if (grant !== null) await recordSpend(grant, amount);
+    // Debit under the per-grant lock so a concurrent auto-approval cannot
+    // interleave its own read-modify-write between this read and write.
+    if (grant !== null) await withGrantLock(grant.id, () => recordSpend(grant, amount));
     await clearPendingX402Payment();
     return { paymentHeader };
   },
@@ -1440,6 +1480,24 @@ const handlers: HandlerMap = {
       throw new ProtocolError('BAD_REQUEST', 'Signing address is not a wallet account.');
     }
 
+    // Decode and screen BEFORE prompting: `signSolanaMessage` is a bare
+    // ed25519 signature with no domain separation, so a "message" that is
+    // actually a serialized transaction message would turn this endpoint into
+    // a transaction-signing oracle behind a benign-looking prompt. Refuse
+    // those outright (Phantom-style detection) — they never reach the user.
+    let messageBytes: Uint8Array;
+    try {
+      messageBytes = base58.decode(payload.message);
+    } catch {
+      throw new ProtocolError('BAD_REQUEST', 'Message is not valid base58.');
+    }
+    if (looksLikeTransactionMessage(messageBytes, payload.address)) {
+      throw new ProtocolError(
+        'TX_REJECTED',
+        'That payload is a transaction, not a message. Use a transaction signing request.',
+      );
+    }
+
     // Park the request until a human decides, then sign with the vault key.
     const id = crypto.randomUUID();
     await setPendingApproval({
@@ -1466,13 +1524,7 @@ const handlers: HandlerMap = {
     }
 
     return vault.withAccount('solana', accountIndex, async (account) => {
-      let message: Uint8Array;
-      try {
-        message = base58.decode(payload.message);
-      } catch {
-        throw new ProtocolError('BAD_REQUEST', 'Message is not valid base58.');
-      }
-      const { signature } = signSolanaMessage(message, account.privateKey);
+      const { signature } = signSolanaMessage(messageBytes, account.privateKey);
       return { signature, publicKey: account.address };
     });
   },
@@ -1616,6 +1668,13 @@ const handlers: HandlerMap = {
   'wc.request.resolve': async (payload) => {
     const req = await getPendingWcRequest();
     if (!req) return { ok: false };
+    // Consent integrity: when the UI binds its decision to a requestId, a
+    // mismatch means the pending request changed underneath the user — the
+    // thing they approved is not the thing pending. Refuse rather than
+    // resolve the wrong request.
+    if (payload.requestId !== undefined && payload.requestId !== req.requestId) {
+      return { ok: false };
+    }
     const client = await getWalletConnectClient();
     if (payload.action === 'deny') {
       await client.respondError(req.topic, req.requestId, {
@@ -1650,6 +1709,10 @@ const handlers: HandlerMap = {
     if (payload.walletId !== undefined) config.walletId = payload.walletId;
     await saveAgentBridgeConfig(config);
     await restartAgentBridge();
+    // Pairing is the user's consent gesture: the agent gets a bounded standing
+    // grant immediately, so subsequent in-cap payments are silent. Fail-open
+    // here would silently lose the grant, so a grant failure fails the pair.
+    await ensureAgentGrant();
     void appendAudit('agent.paired', { mode: payload.mode, endpoint: config.baseUrl });
     return { ok: true };
   },
@@ -1672,6 +1735,9 @@ const handlers: HandlerMap = {
       pairedAt: Date.now(),
     });
     await restartAgentBridge();
+    // Same standing grant as a local pair — the relay connection is the
+    // consent gesture, and the grant is what makes in-cap payments silent.
+    await ensureAgentGrant();
     void appendAudit('agent.paired', { mode: 'relay', endpoint: baseUrl });
 
     // The URL is universal — the same for every user — so the pairing code is
@@ -2346,20 +2412,62 @@ async function resolveWcRequest(req: {
       if (!tx || typeof tx.from !== 'string') {
         throw new ProtocolError('BAD_REQUEST', 'WalletConnect transaction is missing a sender.');
       }
-      const accountIndex = await findEvmAccountIndex(tx.from);
+      const fromAddress = tx.from;
+      const accountIndex = await findEvmAccountIndex(fromAddress);
       if (accountIndex === null) {
         throw new ProtocolError('ORIGIN_DENIED', 'Sender is not a wallet account.');
       }
+
+      // Session binding: the sender must be one of the accounts THIS session
+      // was approved for — a connected dapp must not drive the wallet's other
+      // accounts just because they exist.
+      const session = client.getSessions().find((s) => s.topic === req.topic);
+      if (session === undefined) {
+        throw new ProtocolError('ORIGIN_DENIED', 'The WalletConnect session is no longer active.');
+      }
+      const sessionAccounts = Object.values(session.namespaces ?? {})
+        .flatMap((ns) => (ns as { accounts?: string[] } | undefined)?.accounts ?? [])
+        .map((a) => a.toLowerCase());
+      if (!sessionAccounts.some((a) => a.endsWith(`:${fromAddress.toLowerCase()}`) || a === fromAddress.toLowerCase())) {
+        throw new ProtocolError(
+          'ORIGIN_DENIED',
+          'The sender is not an approved account of this session.',
+        );
+      }
+
+      // Chain binding: the session request names its chain (eip155:<id>) and
+      // the signature must be for THAT chain. Signing with the globally
+      // selected network instead would produce a transaction on a chain the
+      // user never reviewed the request under.
+      const requestedChain = /^eip155:(\d+)$/.exec(req.chainId);
+      if (requestedChain !== null) {
+        const selected = await getSelectedNetwork('evm');
+        if (selected.chainId !== Number(requestedChain[1])) {
+          throw new ProtocolError(
+            'CHAIN_UNSUPPORTED',
+            `The request targets chain ${requestedChain[1]} but the wallet's EVM network is ${selected.chainId ?? 'unknown'}. Switch networks or decline.`,
+          );
+        }
+      }
+
       const value =
         typeof tx.value === 'string' && tx.value.length > 0 ? normalizeWei(tx.value) : 0n;
+      // No `to` = contract deployment, unsupported here — never substitute the
+      // sender's own address (the approval UI showed no such transfer).
       const to = typeof tx.to === 'string' && tx.to.length > 0 ? tx.to : undefined;
+      if (to === undefined) {
+        throw new ProtocolError(
+          'BAD_REQUEST',
+          'The WalletConnect transaction has no recipient (contract deployment is not supported).',
+        );
+      }
       const data =
         typeof tx.data === 'string' && tx.data.length > 0 ? hexToBytesStrict(tx.data) : undefined;
 
       const hash = await vault.withAccount('evm', accountIndex, async (account) => {
         const service = createChainService('evm', await resolveNetworkRpcUrl('evm'));
         const source = new RpcFeeSource(await resolveNetworkRpcUrls('evm'));
-        const target = to ?? account.address;
+        const target = to;
         const [nonce, fees] = await Promise.all([
           service.getSequence(account.address),
           estimateTransferFee(source, account.address, target, value, data),
@@ -3099,16 +3207,25 @@ async function buildAndBroadcast(
  */
 async function fetchSolanaBlockhash(): Promise<Uint8Array> {
   const rpcUrl = await resolveNetworkRpcUrl('solana');
-  const response = await fetch(rpcUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'getLatestBlockhash',
-      params: [{ commitment: 'confirmed' }],
-    }),
-  });
+  // Bounded wait: a hung endpoint must not hang the send flow forever.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  let response: Response;
+  try {
+    response = await fetch(rpcUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getLatestBlockhash',
+        params: [{ commitment: 'confirmed' }],
+      }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   if (!response.ok) {
     throw new Error(`Solana RPC getLatestBlockhash: HTTP ${response.status}`);
   }
@@ -3127,7 +3244,13 @@ async function fetchSolanaBlockhash(): Promise<Uint8Array> {
   if (typeof blockhash !== 'string' || blockhash.length === 0) {
     throw new Error('Solana RPC getLatestBlockhash: no blockhash in response.');
   }
-  return base58.decode(blockhash);
+  const decoded = base58.decode(blockhash);
+  // A blockhash is exactly 32 bytes; a malformed one builds a malformed
+  // message that nodes reject — fail here with a clear cause instead.
+  if (decoded.length !== 32) {
+    throw new Error('Solana RPC getLatestBlockhash: malformed blockhash length.');
+  }
+  return decoded;
 }
 
 // ---------------------------------------------------------------------------
@@ -3140,6 +3263,62 @@ async function fetchSolanaBlockhash(): Promise<Uint8Array> {
  * cannot affect any website's access.
  */
 const AGENT_CLIENT_ID = 'mcp:veilpay';
+
+/**
+ * The default standing authorization created when the user pairs an agent
+ * (local bridge or hosted relay). Pairing IS the consent gesture — the user
+ * clicked Connect on a privileged wallet surface — so per-payment prompts
+ * would only be consent fatigue. The grant is what makes agent payments
+ * silent AND bounded:
+ *
+ *   - up to 0.01 native units per payment and 0.1 per day, auto-approved;
+ *   - anything larger is DENIED outright (approvalThreshold sits above the
+ *     per-op cap, so the threshold never downgrades a payment to a prompt —
+ *     the caps are the whole envelope);
+ *   - expires after 90 days, revocable anytime from VAP Grants.
+ *
+ * Caps are wei-denominated (18 decimals); the agent send path normalizes
+ * other chains' amounts into wei-equivalent value before checking, so "0.01"
+ * means 0.01 ETH / SOL / XLM alike rather than 0.01 of each chain's smallest
+ * unit (which would be catastrophic across chains with fewer decimals).
+ */
+const AGENT_GRANT_MAX_PER_OPERATION = '10000000000000000'; // 0.01 native
+const AGENT_GRANT_MAX_PER_WINDOW = '100000000000000000'; // 0.1 native / day
+const AGENT_GRANT_WINDOW_SECONDS = 86_400;
+const AGENT_GRANT_LIFETIME_MS = 90 * 86_400_000;
+
+/**
+ * Creates (or refreshes) the agent's standing grant with the default caps.
+ * Idempotent: createGrant revokes and replaces any prior active grant for the
+ * agent client, so re-pairing resets the envelope instead of stacking.
+ */
+async function ensureAgentGrant(): Promise<void> {
+  const grant = await createGrant({
+    clientId: AGENT_CLIENT_ID,
+    clientLabel: 'AI agent (paired bridge)',
+    caps: {
+      maxPerOperation: AGENT_GRANT_MAX_PER_OPERATION,
+      maxPerWindow: AGENT_GRANT_MAX_PER_WINDOW,
+      windowSeconds: AGENT_GRANT_WINDOW_SECONDS,
+      // Above the per-op cap, so nothing within the caps ever prompts and
+      // anything beyond them is denied, not deferred to a human.
+      approvalThreshold: AGENT_GRANT_MAX_PER_WINDOW,
+      allowedOps: ['native.transfer', 'x402.pay'],
+      allowedChains: ['evm', 'solana', 'stellar'],
+      allowlist: [],
+    },
+    expiresAt: Date.now() + AGENT_GRANT_LIFETIME_MS,
+  });
+  void appendAudit('grant.created', {
+    grantId: grant.id,
+    clientId: AGENT_CLIENT_ID,
+    maxPerOperation: AGENT_GRANT_MAX_PER_OPERATION,
+    maxPerWindow: AGENT_GRANT_MAX_PER_WINDOW,
+    windowSeconds: AGENT_GRANT_WINDOW_SECONDS,
+    approvalThreshold: AGENT_GRANT_MAX_PER_WINDOW,
+    by: 'pairing',
+  });
+}
 
 let agentLoop: AgentBridgeLoop | null = null;
 
@@ -3373,28 +3552,42 @@ async function executeAgentSend(args: Record<string, unknown>): Promise<unknown>
 
   const grant = await getActiveGrantByOrigin(AGENT_CLIENT_ID);
   if (grant !== null) {
-    const window = await loadSpendWindow(grant);
-    const decision = requiresApproval(
-      grant,
-      { type: 'native.transfer', amount, chain, recipient: to },
-      BigInt(window.amountSpent)
-    );
+    // Grant caps are wei-denominated (18 decimals). Normalize this chain's
+    // amount to the same scale BEFORE the cap check and the window debit, so
+    // a cap of "0.01" means 0.01 ETH / SOL / XLM — not 0.01 of the smallest
+    // unit of a chain with fewer decimals (which would be valueless dust on
+    // EVM and millions of units on Solana).
+    const grantAmount = amount * 10n ** BigInt(18 - decimals);
 
-    if (decision.action === 'deny') {
-      void appendAudit('op.denied', {
-        clientId: AGENT_CLIENT_ID,
-        chain,
-        amount: amount.toString(),
-        recipient: to,
-        grantId: grant.id,
-        reason: decision.reason,
-      });
-      throw new ProtocolError('BAD_REQUEST', `Denied by the spending grant (${decision.reason}).`);
-    }
+    // The whole check→broadcast→debit sequence runs under the per-grant lock:
+    // two concurrent agent payments must not both pass the window check
+    // against the same stale total.
+    const settled = await withGrantLock(grant.id, async (): Promise<{ hash: string } | null> => {
+      const window = await loadSpendWindow(grant);
+      const decision = requiresApproval(
+        grant,
+        { type: 'native.transfer', amount: grantAmount, chain, recipient: to },
+        BigInt(window.amountSpent)
+      );
 
-    if (decision.action === 'auto') {
+      if (decision.action === 'deny') {
+        void appendAudit('op.denied', {
+          clientId: AGENT_CLIENT_ID,
+          chain,
+          amount: amount.toString(),
+          recipient: to,
+          grantId: grant.id,
+          reason: decision.reason,
+        });
+        throw new ProtocolError('BAD_REQUEST', `Denied by the spending grant (${decision.reason}).`);
+      }
+
+      if (decision.action !== 'auto') {
+        return null; // human prompt below, outside the lock
+      }
+
       const result = await broadcast();
-      await recordSpend(grant, amount);
+      await recordSpend(grant, grantAmount);
       void appendAudit('op.settled', {
         clientId: AGENT_CLIENT_ID,
         chain,
@@ -3404,7 +3597,10 @@ async function executeAgentSend(args: Record<string, unknown>): Promise<unknown>
         approvedBy: 'grant',
         hash: result.hash,
       });
-      return { hash: result.hash, chain, to, amount: amountText };
+      return result;
+    });
+    if (settled !== null) {
+      return { hash: settled.hash, chain, to, amount: amountText };
     }
     // 'required' means above the threshold — fall through to the human prompt.
   }

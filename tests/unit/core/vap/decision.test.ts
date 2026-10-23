@@ -4,6 +4,7 @@ import {
   loadSpendWindow,
   recordSpend,
   requiresApproval,
+  withGrantLock,
 } from '@/core/vap/decision';
 import type { Grant } from '@/core/vap/grant';
 
@@ -126,5 +127,60 @@ describe('spend window', () => {
     const window = await loadSpendWindow(grant(), later);
     expect(window.amountSpent).toBe('1000000000000000');
     expect(window.windowStart).toBe(later);
+  });
+
+  it('serializes concurrent check→debit sequences so the window cap holds', async () => {
+    // Two concurrent auto-sized ops (0.05 ETH each, window cap 5 ETH here so
+    // the cap itself is not what stops them — a tighter cap proves the race:
+    // set maxPerWindow to exactly one op, so the second op MUST be denied if
+    // and only if it observes the first op's debit).
+    const tight = grant({
+      caps: {
+        maxPerOperation: '1000000000000000000',
+        maxPerWindow: '60000000000000000', // 0.06 ETH: one op fits, two do not
+        windowSeconds: 86_400,
+        approvalThreshold: '100000000000000000', // 0.1 ETH: both ops stay auto
+        allowedOps: ['x402.pay'],
+        allowedChains: ['evm'],
+        allowlist: [],
+      },
+    });
+
+    // 0.05 ETH in base units (5×10^16 wei — NOT 5n**16n, which is 5^16).
+    const OP_AMOUNT = 5n * 10n ** 16n;
+    const attempt = () =>
+      withGrantLock(tight.id, async () => {
+        const window = await loadSpendWindow(tight, NOW);
+        const decision = requiresApproval(tight, op(OP_AMOUNT), BigInt(window.amountSpent), NOW);
+        if (decision.action !== 'auto') return decision.action;
+        await recordSpend(tight, OP_AMOUNT, NOW);
+        return 'settled';
+      });
+
+    const [first, second] = await Promise.all([attempt(), attempt(), attempt()]);
+    const outcomes = [first, second, (await Promise.all([attempt()]))[0]];
+    expect(outcomes.filter((o) => o === 'settled')).toHaveLength(1);
+    expect(outcomes.filter((o) => o === 'deny')).toHaveLength(2);
+
+    const window = await loadSpendWindow(tight, NOW);
+    expect(window.amountSpent).toBe('50000000000000000');
+  });
+
+  it('runs critical sections for different grants concurrently', async () => {
+    const other = grant({ id: 'grant-2' });
+    const order: string[] = [];
+    await Promise.all([
+      withGrantLock('grant-1', async () => {
+        await new Promise((r) => setTimeout(r, 10));
+        order.push('grant-1');
+      }),
+      withGrantLock('grant-2', async () => {
+        order.push('grant-2');
+      }),
+    ]);
+    // grant-2 finishes first because it is not queued behind grant-1.
+    expect(order[0]).toBe('grant-2');
+    expect(order[1]).toBe('grant-1');
+    void other;
   });
 });

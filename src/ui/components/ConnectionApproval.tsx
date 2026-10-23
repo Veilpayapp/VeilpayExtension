@@ -94,8 +94,11 @@ export function ConnectionApproval({
                   </span>
                   <div className="min-w-0 flex-1">
                     <p className="font-body text-xs font-semibold text-content-primary">{meta.label}</p>
-                    <p className="truncate font-mono text-[10px] text-content-tertiary">
-                      {acc.address.slice(0, 10)}…{acc.address.slice(-4)}
+                    {/* Approval surface: the address is shown IN FULL — a
+                        truncated address on a consent screen is how account
+                        confusion and address-poisoning start. */}
+                    <p className="break-all font-mono text-[10px] text-content-tertiary">
+                      {acc.address}
                     </p>
                   </div>
                 </li>

@@ -348,8 +348,8 @@ export function Dashboard({
         )}
       </div>
 
-      {/* 2. Total Balance Card (matches Screenshot 1) */}
-      <section className="relative rounded-2xl border border-surface-700/80 bg-surface-800/80 p-4 shadow-raised">
+      {/* 2. Total Balance Card (matches Screenshot 1 & 5) */}
+      <section className="relative rounded-2xl border border-surface-600/80 bg-[#F9F8F6] dark:bg-surface-800/80 p-4 shadow-sm">
         {/* Top row: Label + Eye toggle */}
         <div className="flex items-center justify-between">
           <span className="font-mono text-xs text-content-tertiary">Total balance</span>
@@ -363,11 +363,9 @@ export function Dashboard({
           </button>
         </div>
 
-        {/* Large Balance Display — the real on-chain balance, native units.
-            No USD figure is shown: there is no market-data source, so any
-            dollar value here would be fabricated. */}
+        {/* Large Balance Display */}
         <div className="mt-1 flex items-baseline justify-between">
-          <div className="font-display text-3xl font-extrabold tracking-tight text-white">
+          <div className="font-display text-3xl font-extrabold tracking-tight text-content-primary">
             {showBalance ? displayCrypto : '••••••••'}
           </div>
         </div>
@@ -381,7 +379,7 @@ export function Dashboard({
           <button
             type="button"
             onClick={onLock}
-            className="flex items-center gap-1.5 rounded-lg border border-accent-500/70 bg-accent-500/10 px-2.5 py-1 font-mono text-xs font-semibold text-accent-500 transition-colors hover:bg-accent-500/20 active:scale-95"
+            className="flex items-center gap-1.5 rounded-lg border border-accent-500 bg-transparent dark:bg-accent-500/10 px-2.5 py-1 font-mono text-xs font-semibold text-accent-500 transition-colors hover:bg-accent-500/15 active:scale-95"
           >
             <Glyph name="lock" className="h-3 w-3" />
             <span>Wallet</span>
@@ -389,14 +387,14 @@ export function Dashboard({
         </div>
       </section>
 
-      {/* 3. Four Quick Action Square Buttons (matches Screenshot 1) */}
+      {/* 3. Four Quick Action Square Buttons (matches Screenshot 1 & 5) */}
       <div className="grid grid-cols-4 gap-2.5 py-1">
         {/* SEND */}
         <button
           type="button"
           onClick={() => onSend(activeAccountIdx)}
           aria-label="Send"
-          className="flex aspect-square flex-col items-center justify-center gap-1.5 rounded-xl border border-surface-700 bg-surface-800/90 p-2 text-content-primary transition-all duration-base hover:-translate-y-0.5 hover:border-accent-500/50 hover:bg-surface-700 active:scale-95"
+          className="flex aspect-square flex-col items-center justify-center gap-1.5 rounded-xl border border-surface-600 bg-surface-800/90 dark:bg-surface-800/90 p-2 text-content-primary transition-all duration-base hover:-translate-y-0.5 hover:border-accent-500/50 hover:bg-surface-700 active:scale-95"
         >
           <Glyph name="send" className="h-4 w-4 rotate-[-45deg] text-content-primary" />
           <span className="font-mono text-[10px] font-bold tracking-wider text-content-secondary uppercase">
@@ -438,10 +436,10 @@ export function Dashboard({
           type="button"
           onClick={onScan}
           aria-label="Scan"
-          className="flex aspect-square flex-col items-center justify-center gap-1 rounded-xl bg-accent-500 p-2 text-surface-900 shadow-[0_4px_14px_-2px_rgba(245,158,11,0.55)] transition-all duration-base hover:-translate-y-0.5 hover:brightness-105 active:scale-95"
+          className="flex aspect-square flex-col items-center justify-center gap-1 rounded-xl bg-accent-500 p-2 text-white shadow-[0_4px_14px_-2px_rgba(245,158,11,0.55)] transition-all duration-base hover:-translate-y-0.5 hover:brightness-105 active:scale-95"
         >
-          <Glyph name="scan" className="h-5 w-5 stroke-[2] text-surface-900" />
-          <span className="font-mono text-[10px] font-black tracking-wider text-surface-900 uppercase">
+          <Glyph name="scan" className="h-5 w-5 stroke-[2] text-white" />
+          <span className="font-mono text-[10px] font-black tracking-wider text-white uppercase">
             SCAN
           </span>
         </button>
@@ -451,7 +449,7 @@ export function Dashboard({
           type="button"
           onClick={() => onReceive(activeAccountIdx)}
           aria-label="Receive"
-          className="flex aspect-square flex-col items-center justify-center gap-1.5 rounded-xl border border-surface-700 bg-surface-800/90 p-2 text-content-primary transition-all duration-base hover:-translate-y-0.5 hover:border-accent-500/50 hover:bg-surface-700 active:scale-95"
+          className="flex aspect-square flex-col items-center justify-center gap-1.5 rounded-xl border border-surface-600 bg-surface-800/90 dark:bg-surface-800/90 p-2 text-content-primary transition-all duration-base hover:-translate-y-0.5 hover:border-accent-500/50 hover:bg-surface-700 active:scale-95"
         >
           <Glyph name="receive" className="h-4 w-4 text-content-primary" />
           <span className="font-mono text-[10px] font-bold tracking-wider text-content-secondary uppercase">
@@ -466,49 +464,44 @@ export function Dashboard({
         </div>
       )}
 
-      {/* 4. FIAT GATEWAY Card (matches Screenshot 1).
-            The aggregator backend does not exist yet (fiat.veilpay.org has no
-            DNS record), so this is an honest non-interactive "coming soon"
-            tile — no fake fees, no dead link. */}
+      {/* 4. FIAT GATEWAY Card (matches Screenshot 1 & 5). */}
       <div
         aria-disabled="true"
-        className="flex w-full items-center justify-between rounded-xl border border-surface-700/80 bg-surface-800/80 p-3.5 opacity-75"
+        className="flex w-full items-center justify-between rounded-xl border border-surface-600/80 bg-surface-800/80 p-3.5 opacity-90 transition-colors"
       >
         <div className="flex items-center gap-3">
           <Glyph name="card" className="h-5 w-5 text-accent-500" />
           <div>
-            <div className="font-display text-xs font-bold tracking-wider text-accent-500 uppercase">
-              FIAT GATEWAY
+            <div className="font-display text-xs font-bold tracking-wider text-accent-500 uppercase flex items-center gap-1">
+              <span>FIAT GATEWAY</span>
+              <span className="text-[10px]">›</span>
             </div>
             <div className="mt-0.5 font-mono text-[10px] text-content-secondary">
               Buy/Sell crypto via Veilpay Aggregator
             </div>
           </div>
         </div>
-        <span className="rounded-full border border-surface-600 bg-surface-900 px-2 py-0.5 font-mono text-[9px] font-bold tracking-wider text-content-tertiary uppercase">
+        <span className="rounded-full border border-surface-600 bg-surface-700 px-2 py-0.5 font-mono text-[9px] font-bold tracking-wider text-content-tertiary uppercase">
           Coming soon
         </span>
       </div>
 
-      {/* 5. Privacy Section — the pXLM privacy pool (Stellar Private Payments).
-            The private balance is the live pool balance; the tile opens the
-            privacy surface. Stellar-account-scoped: the pool exists on
-            testnet, so the tile needs the Stellar account loaded. */}
+      {/* 5. Privacy Section — the pXLM privacy pool (Stellar Private Payments). */}
       <section className="flex flex-col gap-2">
-        <h3 className="font-display text-sm font-bold text-white">Privacy</h3>
+        <h3 className="font-display text-sm font-bold text-content-primary">Privacy</h3>
         <button
           type="button"
           onClick={onPrivacy}
           aria-label="Open private payments"
-          className="flex w-full items-center justify-between rounded-xl border border-surface-700/80 bg-surface-800/80 p-3 text-left transition-colors hover:border-accent-500/50"
+          className="flex w-full items-center justify-between rounded-xl border border-surface-600/80 bg-surface-800/80 p-3 text-left transition-colors hover:border-accent-500/50"
         >
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-accent-500/60 bg-surface-900 text-accent-500">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-accent-500/60 bg-surface-700 dark:bg-surface-900 text-accent-500">
               <Glyph name="lock" className="h-5 w-5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="font-display text-sm font-bold text-white">pXLM</span>
+                <span className="font-display text-sm font-bold text-content-primary">pXLM</span>
                 <span className="font-mono text-[9px] font-semibold tracking-wider text-content-tertiary uppercase">
                   PRIVATE XLM
                 </span>
@@ -520,7 +513,7 @@ export function Dashboard({
           </div>
 
           <div className="text-right">
-            <div className="font-mono text-xs font-bold text-white">
+            <div className="font-mono text-xs font-bold text-content-primary">
               {sppBalanceText}
             </div>
             <div className="mt-0.5 flex items-center justify-end gap-1 font-mono text-[10px] font-bold tracking-wider text-accent-500">
@@ -531,10 +524,10 @@ export function Dashboard({
         </button>
       </section>
 
-      {/* 6. Assets Section (matches Screenshot 1) */}
+      {/* 6. Assets Section (matches Screenshot 1 & 5) */}
       <section className="flex flex-col gap-2">
         <div className="flex items-center justify-between">
-          <h3 className="font-display text-sm font-bold text-white">Assets</h3>
+          <h3 className="font-display text-sm font-bold text-content-primary">Assets</h3>
           <div className="flex items-center gap-3">
             <button
               type="button"
@@ -543,8 +536,6 @@ export function Dashboard({
             >
               Manage
             </button>
-            {/* MetaMask-style add-token: opens the chain-aware modal and the
-                token lands in the registry (and the send form's picker). */}
             <button
               type="button"
               onClick={() => setAddTokenChain(activeChain)}
@@ -573,14 +564,14 @@ export function Dashboard({
               return (
                 <li
                   key={key}
-                  className="flex items-center justify-between rounded-xl border border-surface-700/80 bg-surface-800/80 p-3 transition-colors hover:border-surface-600"
+                  className="flex items-center justify-between rounded-xl border border-surface-600/80 bg-surface-800/80 p-3 transition-colors hover:border-surface-600"
                 >
                   <div className="flex items-center gap-3">
                     <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-surface-700">
                       <span className="text-xs font-bold text-accent-500">●</span>
                     </div>
                     <div>
-                      <div className="font-display text-sm font-bold text-white">{meta.label}</div>
+                      <div className="font-display text-sm font-bold text-content-primary">{meta.label}</div>
                       <div className="font-mono text-[10px] text-content-tertiary">
                         {meta.symbol} · {networkName}
                       </div>
@@ -589,7 +580,7 @@ export function Dashboard({
 
                   <div className="flex items-center gap-3">
                     <div className="text-right">
-                      <div className="font-mono text-xs font-bold text-white">
+                      <div className="font-mono text-xs font-bold text-content-primary">
                         {showBalance ? `${cryptoAmt} ${meta.symbol}` : '••••••••'}
                       </div>
                     </div>
@@ -626,8 +617,6 @@ export function Dashboard({
                 </li>
               );
             })}
-            {/* Custom tokens — the MetaMask-style registry, per chain, with
-                live base-unit balances from the background. */}
             {customTokens.map((token, idx) => {
               const acc = accounts.find((a) => a.chain === token.chain);
               if (acc === undefined) return null;
@@ -637,14 +626,14 @@ export function Dashboard({
                 <li
                   key={token.id}
                   style={{ animationDelay: `${Math.min(idx * 40, 200)}ms` }}
-                  className="flex animate-fade-in-up items-center justify-between rounded-xl border border-surface-700/60 bg-surface-800/60 p-3 transition-colors hover:border-surface-600"
+                  className="flex animate-fade-in-up items-center justify-between rounded-xl border border-surface-600/60 bg-surface-800/60 p-3 transition-colors hover:border-surface-600"
                 >
                   <div className="flex items-center gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-accent-500/30 bg-surface-900">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-accent-500/30 bg-surface-700 dark:bg-surface-900">
                       <Glyph name="token" className="h-4 w-4 text-accent-500" />
                     </div>
                     <div>
-                      <div className="font-display text-sm font-bold text-white">{token.symbol}</div>
+                      <div className="font-display text-sm font-bold text-content-primary">{token.symbol}</div>
                       <div className="max-w-[11rem] truncate font-mono text-[10px] text-content-tertiary">
                         {token.kind === 'stellar-issued'
                           ? `${token.code} · ${token.issuer!.slice(0, 8)}…`
@@ -653,7 +642,7 @@ export function Dashboard({
                     </div>
                   </div>
                   <div className="flex items-center gap-3">
-                    <div className="text-right font-mono text-xs font-bold text-white">
+                    <div className="text-right font-mono text-xs font-bold text-content-primary">
                       {showBalance ? `${cryptoAmt} ${token.symbol}` : '••••••••'}
                     </div>
                     <button
@@ -677,7 +666,7 @@ export function Dashboard({
       <section className="flex flex-col gap-2">
         <div className="flex items-center justify-between">
           <div className="flex items-baseline gap-1.5">
-            <h3 className="font-display text-sm font-bold text-white">Activity</h3>
+            <h3 className="font-display text-sm font-bold text-content-primary">Activity</h3>
             <span className="sr-only">Recent Transactions</span>
           </div>
           <button

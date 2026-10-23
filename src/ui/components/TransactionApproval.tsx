@@ -11,6 +11,10 @@ import type { PendingApproval } from '@/ui/store/useWallet';
  *
  * Defaults to ETH at 18 decimals for dapp requests, which carry no metadata;
  * agent payments carry an explicit symbol and decimals.
+ *
+ * Values that truncate to "0.0000" fall back to raw base units: a rounded
+ * zero on an approval overlay would make a real payment look like a no-op
+ * (the same rule X402Approval follows).
  */
 function formatAmount(value: string | undefined, symbol = 'ETH', decimals = 18): string {
   if (value === undefined) return `0 ${symbol}`;
@@ -20,6 +24,9 @@ function formatAmount(value: string | undefined, symbol = 'ETH', decimals = 18):
     const whole = raw / scale;
     const fraction = raw % scale;
     const frac = fraction.toString().padStart(decimals, '0').slice(0, 4);
+    if (whole === 0n && /^0+$/.test(frac) && raw > 0n) {
+      return `${value} ${symbol} (base units)`;
+    }
     return `${whole}.${frac} ${symbol}`;
   } catch {
     return `${value} ${symbol}`;

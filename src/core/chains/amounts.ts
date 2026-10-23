@@ -16,6 +16,12 @@ export const MaxUint256 = 2n ** 256n - 1n;
  * other wallets. Throws RangeError when the scaled value exceeds uint256.
  */
 export function decimalAmountToBaseUnits(decimal: string, decimals: number): bigint {
+  // Shape-check first: BigInt('-5') happily produces a negative, and anything
+  // the wire encoders do with a negative or malformed amount is silently wrong
+  // (sign display says one thing, the signed bytes say another).
+  if (!/^\d+(\.\d+)?$/.test(decimal)) {
+    throw new RangeError('Amount must be a non-negative decimal string.');
+  }
   const dot = decimal.indexOf('.');
   const whole = dot === -1 ? decimal : decimal.slice(0, dot);
   const frac = dot === -1 ? '' : decimal.slice(dot + 1);

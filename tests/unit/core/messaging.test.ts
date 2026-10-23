@@ -14,6 +14,16 @@ const uiSender = {
   url: 'chrome-extension://veilpay-test/popup.html',
 } as chrome.runtime.MessageSender;
 
+/**
+ * The offscreen document shares the extension origin but is NOT a wallet UI
+ * surface: the privileged gate keys on the Chrome-stamped URL path, which a
+ * sender cannot influence.
+ */
+const offscreenSender = {
+  origin: 'chrome-extension://veilpay-test',
+  url: 'chrome-extension://veilpay-test/offscreen.html',
+} as chrome.runtime.MessageSender;
+
 /** A content script running in a page. Chrome always stamps the tab. */
 const pageSender = {
   origin: 'https://evil.example',
@@ -386,14 +396,15 @@ describe('privileged kind enforcement', () => {
     expect(reset).not.toHaveBeenCalled();
   });
 
-  it('denies a privileged kind whose declared source is not a UI surface', async () => {
-    // Extension origin, no tab — but `inpage` is not an authorised surface, so
-    // the source check still rejects it.
+  it('ignores the declared source: the Chrome-stamped URL path decides the surface', async () => {
+    // A message genuinely sent by the popup (its stamped URL says so) is not
+    // penalized for a mismatched `source` claim — the field is cosmetic, and
+    // authorization never rests on it.
     const response = await dispatch(
       {
         id: newId(),
         v: 1,
-        source: 'inpage',
+        source: 'inpage', // a lie, but the stamped URL is the truth
         kind: 'mnemonic.generate',
         payload: { strength: 256 },
       },
@@ -401,22 +412,22 @@ describe('privileged kind enforcement', () => {
       handlers()
     );
 
-    expect(response.ok).toBe(false);
-    if (!response.ok) expect(response.error.code).toBe('ORIGIN_DENIED');
+    expect(response.ok).toBe(true);
   });
 
-  it('denies a privileged kind from the offscreen document', async () => {
-    // The offscreen document runs the ZK probe. It has extension origin but no
-    // business touching the vault.
+  it('denies a privileged kind from the offscreen document, even claiming to be the popup', async () => {
+    // The offscreen document runs the ZK probe and the vendored SPP SDK. It
+    // shares the extension origin, so ONLY the stamped URL path keeps it away
+    // from the vault — this is the exact forgery the gate exists to stop.
     const response = await dispatch(
       {
         id: newId(),
         v: 1,
-        source: 'offscreen',
+        source: 'popup', // forged
         kind: 'vault.reset',
         payload: { confirmation: 'DELETE' },
       },
-      uiSender,
+      offscreenSender,
       handlers()
     );
 
@@ -533,21 +544,24 @@ describe('privileged kind enforcement', () => {
   });
 
   it('denies account.exportKey from the offscreen document', async () => {
-    // Offscreen shares our origin and has no tab, but must never hold a private key.
+    // Offscreen shares our origin and has no tab, but must never hold a private
+    // key — even when it forges `source: 'popup'`.
+    const exportKey = vi.fn();
     const response = await dispatch(
       {
         id: newId(),
         v: 1,
-        source: 'offscreen',
+        source: 'popup', // forged
         kind: 'account.exportKey',
         payload: { chain: 'evm', index: 0 },
       },
-      uiSender,
-      handlers()
+      offscreenSender,
+      handlers({ 'account.exportKey': exportKey as unknown as HandlerMap['account.exportKey'] })
     );
 
     expect(response.ok).toBe(false);
     if (!response.ok) expect(response.error.code).toBe('ORIGIN_DENIED');
+    expect(exportKey).not.toHaveBeenCalled();
   });
 
   it('denies permissions.grant from a compromised content script', async () => {

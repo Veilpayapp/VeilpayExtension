@@ -104,6 +104,15 @@ export function decodeStellarAddress(address: string): Uint8Array {
   if (version !== 6 << 3) {
     throw new Error(`Unexpected Stellar address version byte: ${version}.`);
   }
+  // The CRC16-XModem checksum (last two bytes, little-endian) exists to catch
+  // exactly this: a corrupted or mistyped address must fail HERE, not sign a
+  // payment to the wrong key.
+  const payload = decoded.subarray(0, 33);
+  const expectedCrc = crc16Xmodem(payload);
+  const actualCrc = (decoded[33] ?? 0) | ((decoded[34] ?? 0) << 8);
+  if (actualCrc !== expectedCrc) {
+    throw new Error('Invalid Stellar address checksum.');
+  }
   // Return the raw 32-byte public key (skip version, skip 2-byte checksum).
   return decoded.subarray(1, 33);
 }
@@ -131,6 +140,11 @@ export function encodeStellarAddress(publicKey: Uint8Array): string {
 // ---------------------------------------------------------------------------
 
 function xdrUint32(value: number): Uint8Array {
+  // Fail closed on out-of-range input: `>>>` silently wraps values ≥ 2^32, so
+  // without this check the signed bytes would not match what was displayed.
+  if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) {
+    throw new RangeError(`XDR uint32 out of range: ${value}.`);
+  }
   return new Uint8Array([
     (value >>> 24) & 0xff,
     (value >>> 16) & 0xff,
@@ -139,7 +153,16 @@ function xdrUint32(value: number): Uint8Array {
   ]);
 }
 
+/** Stellar's 64-bit fields are signed int64 on the wire (amounts, sequence). */
+const XDR_INT64_MAX = (1n << 63n) - 1n;
+
 function xdrUint64(value: bigint): Uint8Array {
+  // Fail closed on out-of-range input: the byte loop silently drops high bits
+  // for value ≥ 2^64 and mangles negatives, so the signed payload would differ
+  // from the amount the user approved.
+  if (value < 0n || value > XDR_INT64_MAX) {
+    throw new RangeError(`XDR int64 out of range: ${value}.`);
+  }
   const out = new Uint8Array(8);
   for (let i = 7; i >= 0; i -= 1) {
     out[i] = Number(value & 0xffn);

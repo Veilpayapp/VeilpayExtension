@@ -143,6 +143,62 @@ describe('runViewTransition', () => {
     await Promise.resolve();
     expect(document.documentElement.dataset.viewNav).toBeUndefined();
   });
+
+  it('observes every transition promise so an aborted transition stays silent', async () => {
+    // The real-world failure this pins: a popup view change that resizes the
+    // viewport mid-motion makes Chrome reject `ready`/`updateCallbackDone`/
+    // `finished` with InvalidStateError "Viewport size changed". `ready` and
+    // `updateCallbackDone` must be OBSERVED (handler attached) or the console
+    // fills with "Uncaught (in promise) InvalidStateError". jsdom does not
+    // surface unhandled DOM rejections, so the stub records which promises
+    // the library actually attached handlers to.
+    const abort = new DOMException(
+      'Transition was aborted because of invalid state. Viewport size changed',
+      'InvalidStateError',
+    );
+    const observed: string[] = [];
+
+    /** A thenable spy around a REAL rejection, recording observation. */
+    const observedRejection = (name: string): Promise<void> => {
+      const real = Promise.reject(abort);
+      // Keep the real rejection from being an unhandled one under the test
+      // itself — the question is whether the LIBRARY observes it.
+      real.then(undefined, () => undefined);
+      return {
+        then: (onFulfilled: unknown, onRejected: unknown) => {
+          observed.push(name);
+          return real.then(
+            onFulfilled as () => void,
+            onRejected as ((reason: unknown) => void),
+          );
+        },
+        catch: (onRejected: (reason: unknown) => void) => {
+          observed.push(name);
+          return real.then(undefined, onRejected);
+        },
+      } as unknown as Promise<void>;
+    };
+
+    installStartViewTransition((callback: () => void) => {
+      callback();
+      return {
+        updateCallbackDone: observedRejection('updateCallbackDone'),
+        ready: observedRejection('ready'),
+        finished: observedRejection('finished'),
+      };
+    });
+
+    runViewTransition('forward', vi.fn());
+    // All three promises must have handlers attached — the old code observed
+    // only `finished`, which left the other two as unhandled rejections.
+    expect(observed).toContain('updateCallbackDone');
+    expect(observed).toContain('ready');
+    expect(observed).toContain('finished');
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(document.documentElement.dataset.viewNav).toBeUndefined();
+  });
 });
 
 describe('ViewId type sanity (compile-time)', () => {

@@ -83,24 +83,34 @@ export function hashToScalar(data: Uint8Array): bigint {
 }
 
 function randomScalar(): Uint8Array {
-  const bytes = crypto.getRandomValues(new Uint8Array(32));
-  let value = bytesToBigInt(bytes) % L;
-  if (value === 0n) value = 1n;
-  return bigIntToBytes32(value);
+  // Rejection sampling: 32 uniform bytes mod L would over-represent values
+  // below 2^256 mod L (~1/12 probability boost, since L ≈ 2^252). Drawing
+  // until the value lands in [1, L) is exactly uniform. This only feeds
+  // EPHEMERAL keys (never persisted, never re-derived), so tightening the
+  // distribution changes no existing address or shared secret.
+  for (;;) {
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    const value = bytesToBigInt(bytes);
+    if (value >= 1n && value < L) return bigIntToBytes32(value);
+  }
 }
 
 /**
  * Derives the stealth spend/view scalars from the vault mnemonic.
  *
- * SLIP-10 ed25519 (the same machinery the Stellar accounts use) at
- * dedicated hardened paths m/8888'/0' (spend) and m/8888'/1' (view) —
- * disjoint from every payment path, so a stealth key can never collide with
- * an account key and restoring the phrase restores stealth funds.
+ * SLIP-10 ed25519 (the same machinery the Stellar accounts use) at the
+ * dedicated hardened children of the master key: child(0') for spend,
+ * child(1') for view — m/0' and m/1' in path notation, disjoint from the
+ * payment path m/44'/148'/i', so a stealth key can never collide with an
+ * account key, and restoring the phrase restores stealth funds.
  *
  * The SLIP-10 output is reduced to a CANONICAL scalar (mod L, nonzero):
  * ~6% of raw 32-byte derivations exceed L, and the scheme's point arithmetic
  * requires canonical scalars (the seed model would hash+clamp instead, which
- * cannot support additive derivation at all).
+ * cannot support additive derivation at all). The reduction is applied to a
+ * FIXED derivation input, so its slight modulo bias only narrows the keyspace
+ * by ~2^-4 bits of entropy — it must NOT be "fixed" here, because changing it
+ * would change every existing wallet's stealth addresses and strand funds.
  */
 export function deriveStealthKeys(mnemonic: string): StealthKeys {
   const seed = mnemonicToSeed(mnemonic);

@@ -26,20 +26,18 @@ function cacheKey(method: string, params: unknown[]): string {
   return `${method}:${JSON.stringify(params)}`;
 }
 
-// Methods that are safe to cache (read-only, idempotent).
+// Methods that are safe to cache (read-only, idempotent, and STABLE for the
+// cache window). Deliberately excluded: nonces (eth_getTransactionCount),
+// blockhashes (getLatestBlockhash), fee markets (eth_gasPrice, eth_feeHistory,
+// eth_maxPriorityFeePerGas, getFeeForMessage), and gas estimates
+// (eth_estimateGas) — a 5-minute-old nonce guarantees replacement/nonce-too-low
+// failures on back-to-back sends, and Solana blockhashes expire in ~60–90 s.
 const CACHEABLE_METHODS = new Set([
   'getBalance',
   'getAccountInfo',
-  'getLatestBlockhash',
-  'getFeeForMessage',
   'eth_blockNumber',
   'eth_getBalance',
-  'eth_getTransactionCount',
-  'eth_gasPrice',
-  'eth_maxPriorityFeePerGas',
-  'eth_feeHistory',
   'eth_call',
-  'eth_estimateGas',
   'getBlockHeight',
   'getSlot',
   'getEpochInfo',

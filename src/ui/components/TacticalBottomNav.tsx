@@ -19,7 +19,7 @@ export function TacticalBottomNav({
   return (
     <nav
       aria-label="Main Navigation"
-      className="sticky bottom-0 z-40 mt-auto flex shrink-0 items-center justify-between border-t border-surface-700/80 bg-surface-900/95 px-3 py-1.5 backdrop-blur-md"
+      className="sticky bottom-0 z-40 mt-auto flex shrink-0 items-center justify-between border-t border-surface-600/80 bg-surface-800/95 dark:bg-surface-900/95 px-3 py-1.5 backdrop-blur-md"
     >
       {/* 1. HOME */}
       <button
@@ -34,15 +34,19 @@ export function TacticalBottomNav({
         }`}
       >
         <div
-          className={`flex h-6 w-6 items-center justify-center rounded border transition-colors ${
+          className={`flex h-7 w-7 items-center justify-center rounded transition-colors ${
             activeTab === 'home'
-              ? 'border-accent-500 bg-accent-500/10 text-accent-500'
-              : 'border-transparent text-content-tertiary'
+              ? 'bg-neutral-900 text-white dark:bg-surface-700 dark:text-white shadow-sm'
+              : 'bg-transparent text-content-tertiary'
           }`}
         >
           <Glyph name="home" className="h-4 w-4" />
         </div>
-        <span className="font-mono text-[9px] tracking-wider uppercase">
+        <span
+          className={`font-mono text-[9px] tracking-wider uppercase ${
+            activeTab === 'home' ? 'font-bold text-accent-500' : 'text-content-tertiary'
+          }`}
+        >
           [HOME]
         </span>
       </button>
@@ -60,28 +64,32 @@ export function TacticalBottomNav({
         }`}
       >
         <div
-          className={`flex h-6 w-6 items-center justify-center rounded border transition-colors ${
+          className={`flex h-7 w-7 items-center justify-center rounded transition-colors ${
             activeTab === 'send'
-              ? 'border-accent-500 bg-accent-500/10 text-accent-500'
-              : 'border-transparent text-content-tertiary'
+              ? 'bg-neutral-900 text-white dark:bg-surface-700 dark:text-white shadow-sm'
+              : 'bg-transparent text-content-tertiary'
           }`}
         >
           <Glyph name="send" className="h-4 w-4" />
         </div>
-        <span className="font-mono text-[9px] tracking-wider uppercase">
+        <span
+          className={`font-mono text-[9px] tracking-wider uppercase ${
+            activeTab === 'send' ? 'font-bold text-accent-500' : 'text-content-tertiary'
+          }`}
+        >
           [SEND]
         </span>
       </button>
 
       {/* 3. CENTER FLOATING SCAN */}
-      <div className="flex flex-1 flex-col items-center justify-center -mt-5">
+      <div className="flex flex-1 flex-col items-center justify-center -mt-4">
         <button
           type="button"
           onClick={() => onSelectTab('scan')}
           aria-label="Scan QR"
-          className="flex h-11 w-11 items-center justify-center rounded-lg bg-accent-500 text-surface-900 shadow-[0_4px_16px_rgba(245,158,11,0.55)] transition-transform duration-fast active:scale-90 hover:brightness-110"
+          className="flex h-11 w-11 items-center justify-center rounded-lg bg-accent-500 text-white shadow-[0_4px_16px_rgba(245,158,11,0.55)] transition-transform duration-fast active:scale-90 hover:brightness-110"
         >
-          <Glyph name="scan" className="h-6 w-6 stroke-[2]" />
+          <Glyph name="scan" className="h-6 w-6 stroke-[2] text-white" />
         </button>
         <span className="mt-1 font-mono text-[9px] font-bold tracking-wider text-accent-500 uppercase">
           [SCAN]
@@ -101,15 +109,19 @@ export function TacticalBottomNav({
         }`}
       >
         <div
-          className={`flex h-6 w-6 items-center justify-center rounded border transition-colors ${
+          className={`flex h-7 w-7 items-center justify-center rounded transition-colors ${
             activeTab === 'receive'
-              ? 'border-accent-500 bg-accent-500/10 text-accent-500'
-              : 'border-transparent text-content-tertiary'
+              ? 'bg-neutral-900 text-white dark:bg-surface-700 dark:text-white shadow-sm'
+              : 'bg-transparent text-content-tertiary'
           }`}
         >
           <Glyph name="receive" className="h-4 w-4" />
         </div>
-        <span className="font-mono text-[9px] tracking-wider uppercase">
+        <span
+          className={`font-mono text-[9px] tracking-wider uppercase ${
+            activeTab === 'receive' ? 'font-bold text-accent-500' : 'text-content-tertiary'
+          }`}
+        >
           [RECEIVE]
         </span>
       </button>
@@ -127,15 +139,19 @@ export function TacticalBottomNav({
         }`}
       >
         <div
-          className={`flex h-6 w-6 items-center justify-center rounded border transition-colors ${
+          className={`flex h-7 w-7 items-center justify-center rounded transition-colors ${
             activeTab === 'settings'
-              ? 'border-accent-500 bg-accent-500/10 text-accent-500'
-              : 'border-transparent text-content-tertiary'
+              ? 'bg-neutral-900 text-white dark:bg-surface-700 dark:text-white shadow-sm'
+              : 'bg-transparent text-content-tertiary'
           }`}
         >
           <Glyph name="sun" className="h-4 w-4" />
         </div>
-        <span className="font-mono text-[9px] tracking-wider uppercase">
+        <span
+          className={`font-mono text-[9px] tracking-wider uppercase ${
+            activeTab === 'settings' ? 'font-bold text-accent-500' : 'text-content-tertiary'
+          }`}
+        >
           [SETTINGS]
         </span>
       </button>

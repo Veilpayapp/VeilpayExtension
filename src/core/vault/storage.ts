@@ -14,8 +14,11 @@ import type {
  *
  * `chrome.storage.local` is deliberately not used for secrets: it is readable by
  * anything with the extension's context and has no size headroom for future
- * note/commitment data. IndexedDB holds only ciphertext, so a raw database dump
- * yields nothing without the passphrase.
+ * note/commitment data. The vault's key material lives here only as ciphertext,
+ * so a raw database dump yields nothing without the passphrase. (Exception to
+ * audit before Phase 3: the dormant `privacyCommitments` scaffolding has a
+ * plaintext `secret` field — see SECURITY DEBT in storage-types.ts. No writer
+ * exists today.)
  */
 
 const DB_NAME = 'veilpay';

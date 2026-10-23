@@ -3,8 +3,36 @@
 @tailwind utilities;
 
 @layer base {
-  :root {
+  :root,
+  [data-theme='dark'] {
     color-scheme: dark;
+    --surface-900: 10 10 10;
+    --surface-800: 20 20 20;
+    --surface-700: 31 31 31;
+    --surface-600: 42 42 42;
+    --surface-500: 58 58 58;
+    --content-primary: 250 250 250;
+    --content-secondary: 161 161 170;
+    --content-tertiary: 113 113 122;
+    --content-inverse: 10 10 10;
+    --bg-glow-amber: rgba(245, 158, 11, 0.08);
+    --bg-glow-blue: rgba(59, 130, 246, 0.05);
+  }
+
+  [data-theme='light'],
+  :root[data-theme='light'] {
+    color-scheme: light;
+    --surface-900: 250 249 246; /* #FAF9F6 soft warm off-white canvas */
+    --surface-800: 255 255 255; /* #FFFFFF crisp white cards */
+    --surface-700: 244 244 245; /* #F4F4F5 buttons, chips, row backgrounds */
+    --surface-600: 228 228 231; /* #E4E4E7 borders */
+    --surface-500: 212 212 216; /* #D4D4D8 active/hover borders */
+    --content-primary: 10 10 10; /* #0A0A0A deep black */
+    --content-secondary: 82 82 91; /* #52525B high contrast secondary */
+    --content-tertiary: 113 113 122; /* #71717A muted micro labels */
+    --content-inverse: 250 250 250;
+    --bg-glow-amber: rgba(245, 158, 11, 0.02);
+    --bg-glow-blue: rgba(59, 130, 246, 0.01);
   }
 
   html,
@@ -17,8 +45,8 @@
     @apply bg-surface-900 font-body text-content-primary antialiased;
     /* Soft ambient glow so large surfaces do not read as flat black. */
     background-image:
-      radial-gradient(640px 260px at 50% -60px, rgba(245, 158, 11, 0.08), transparent 70%),
-      radial-gradient(480px 300px at 110% 110%, rgba(59, 130, 246, 0.05), transparent 70%);
+      radial-gradient(640px 260px at 50% -60px, var(--bg-glow-amber), transparent 70%),
+      radial-gradient(480px 300px at 110% 110%, var(--bg-glow-blue), transparent 70%);
     background-attachment: fixed;
   }
 
@@ -51,7 +79,7 @@
   }
 
   [data-theme='light'] body {
-    @apply bg-light-900 text-content-inverse;
+    @apply bg-surface-900 text-content-primary;
   }
 }
 

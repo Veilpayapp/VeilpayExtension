@@ -51,6 +51,11 @@ export function GrantApproval({
   const caps = request.requestedCaps;
   const expiresAt = new Date(Date.now() + request.expiresInSeconds * 1000);
 
+  // Until the security status has loaded we cannot know whether a PIN or
+  // passkey gates this grant — treat "unknown" as "confirmation required"
+  // (fail closed). The background re-verifies either way; this keeps the UI
+  // honest about it.
+  const statusLoaded = securityStatus !== null;
   const pinRequired = securityStatus?.pinEnabled === true;
   const webauthnRequired = securityStatus?.webauthnEnabled === true && !pinRequired;
 
@@ -103,7 +108,9 @@ export function GrantApproval({
   // The button must stay enabled in the idle state so the first click can start
   // the countdown; the confirmation requirement gates only the ready state.
   const confirmationMissing =
-    (pinRequired && pin.length === 0) || (webauthnRequired && !webauthnConfirmed);
+    !statusLoaded ||
+    (pinRequired && pin.length === 0) ||
+    (webauthnRequired && !webauthnConfirmed);
   const approveDisabled = isLoading || confirmState === 'counting' || (confirmState === 'ready' && confirmationMissing);
 
   return (

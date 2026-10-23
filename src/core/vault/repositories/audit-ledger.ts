@@ -16,12 +16,19 @@ function parse(row: unknown): AuditLedgerRecord {
   return AuditLedgerRecordSchema.parse(row) as AuditLedgerRecord;
 }
 
-/** Highest-sequence entry, or undefined on an empty ledger. */
+/**
+ * Highest-sequence entry, or undefined on an empty ledger.
+ *
+ * The store's primary key IS `sequence`, so a `prev` cursor's first row is the
+ * tail — O(1) reads instead of materializing the whole ledger on every audit
+ * append (appendAudit calls this once per write, so getAll made the ledger
+ * quadratically slower as it grew). The returned row is still schema-validated;
+ * whole-ledger validation remains `verifyAuditChain`'s job.
+ */
 export async function tail(): Promise<AuditLedgerRecord | undefined> {
-  const rows = await (await openStorageDatabase()).getAll('auditLedger');
-  if (rows.length === 0) return undefined;
-  const sorted = rows.map(parse).sort((a, b) => a.sequence - b.sequence);
-  return sorted.at(-1);
+  const db = await openStorageDatabase();
+  const cursor = await db.transaction('auditLedger', 'readonly').store.openCursor(null, 'prev');
+  return cursor === null ? undefined : parse(cursor.value);
 }
 
 /** Persists a fully-formed audit record after validating shape and rejecting an

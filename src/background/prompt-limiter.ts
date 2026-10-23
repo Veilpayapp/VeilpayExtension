@@ -15,6 +15,9 @@
 
 const MAX_PROMPTS_PER_MINUTE = 5;
 const WINDOW_MS = 60_000;
+/** Distinct origins tracked before the map resets — bounds memory against a
+ *  burst of one-off origins (each entry is tiny, but unbounded is unbounded). */
+const MAX_TRACKED_ORIGINS = 500;
 
 /** Origin → timestamps of recent prompts, oldest first. */
 const promptHistory = new Map<string, number[]>();
@@ -24,6 +27,12 @@ const promptHistory = new Map<string, number[]>();
  * it. Returns false (auto-deny) when the origin has already prompted 5 times.
  */
 export function allowPrompt(origin: string, now: number = Date.now()): boolean {
+  if (promptHistory.size >= MAX_TRACKED_ORIGINS && !promptHistory.has(origin)) {
+    // Shed the whole window rather than evicting piecemeal: the defense is
+    // against bursts, entries expire in a minute anyway, and a full reset
+    // cannot be abused to exceed a legit origin's 5/minute by much.
+    promptHistory.clear();
+  }
   const recent = (promptHistory.get(origin) ?? []).filter((t) => now - t < WINDOW_MS);
   if (recent.length >= MAX_PROMPTS_PER_MINUTE) {
     promptHistory.set(origin, recent);

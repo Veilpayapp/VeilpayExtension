@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { hexToBytes } from '@noble/hashes/utils';
+import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { keccak_256 } from '@noble/hashes/sha3';
 import { secp256k1 } from '@noble/curves/secp256k1';
+import { encodeList, type RlpItem } from '@/core/chains/evm/rlp';
 import {
   EVM_CHAIN_ID,
   signPersonalMessage,
@@ -56,15 +57,41 @@ describe('EIP-1559 transaction signing', () => {
   it('signature is cryptographically valid (independent secp256k1.verify)', () => {
     const signed = signTransaction(TX, HARDHAT_KEY);
     const digest = hexToBytes(signed.signingHash);
-    const raw = signed.raw.replace(/^0x/, '');
 
-    const { r, s } = extractSignature(raw);
+    const { r, s } = extractSignature(signed.raw.replace(/^0x/, ''));
     const publicKey = secp256k1.getPublicKey(HARDHAT_KEY, true);
 
-    const sig = secp256k1.Signature.fromCompact(
-      new Uint8Array([...r, ...s]),
-    );
+    const sig = new secp256k1.Signature(r, s);
     expect(secp256k1.verify(sig, digest, publicKey)).toBe(true);
+  });
+
+  it('produces a transaction a real node accepts (spec sighash → ecrecover → signer)', () => {
+    // The definitive non-circular check: decode the broadcast envelope, rebuild
+    // the signing preimage EXACTLY as a node does (0x02 || rlp(first 9 fields),
+    // no signature fields), recover the signer from yParity/r/s, and compare to
+    // the externally-known address. The old code hashed 12 fields (three zeroed
+    // signature slots appended); this test fails against that preimage because
+    // recovery over the wrong digest yields a different address.
+    const signed = signTransaction(TX, HARDHAT_KEY);
+    const bytes = hexToBytes(signed.raw.replace(/^0x/, ''));
+    const envelope = decodeRlpItem(bytes, 1);
+    if (!Array.isArray(envelope.item)) throw new Error('Envelope must be an RLP list.');
+    const fields = envelope.item;
+    expect(fields).toHaveLength(12); // 9 unsigned fields + yParity + r + s
+
+    const digest = keccak_256(
+      new Uint8Array([0x02, ...encodeList(fields.slice(0, 9))]),
+    );
+    // A node's sighash must equal the digest the signer used.
+    expect(bytesToHex(digest)).toBe(signed.signingHash);
+
+    const yParity = bigintOf(fields[9]!);
+    const r = bigintOf(fields[10]!);
+    const s = bigintOf(fields[11]!);
+    const sig = new secp256k1.Signature(r, s).addRecoveryBit(Number(yParity));
+    const recovered = sig.recoverPublicKey(digest);
+    const addressBytes = keccak_256(recovered.toRawBytes(false).slice(1)).slice(-20);
+    expect(`0x${bytesToHex(addressBytes)}`).toBe(HARDHAT_ADDRESS.toLowerCase());
   });
 
   it('rejects a malformed private key', () => {
@@ -135,89 +162,76 @@ describe('personal_sign (EIP-191)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Signature extraction helpers — parse the signed raw hex without a full RLP
-// decoder, relying on the fixed structure of a 12-field EIP-1559 envelope.
+// Minimal RLP decoder for the round-trip node-verification tests. The encoder
+// under test is trusted (independently verified); what these tests exercise
+// is FIELD SELECTION — which items make up the signing preimage — and that a
+// node recovering over the spec digest gets the intended signer back.
 // ---------------------------------------------------------------------------
 
-/**
- * Extracts the 32-byte r and s values from a signed EIP-1559 raw hex.
- *
- * Strategy: the RLP list payload is the concatenation of 12 RLP-encoded
- * fields. The last two fields are r and s (32-byte big-endian). We find the
- * 11th field offset by scanning from the start (the first 10 fields are all
- * deterministic for a given transaction), then read r and s.
- */
-function extractSignature(rawHex: string): { r: Uint8Array; s: Uint8Array } {
+function decodeRlpItem(
+  data: Uint8Array,
+  offset: number,
+): { item: RlpItem; next: number } {
+  const prefix = data[offset];
+  if (prefix === undefined) throw new Error('RLP: unexpected end of input.');
+
+  if (prefix < 0x80) {
+    return { item: data.subarray(offset, offset + 1), next: offset + 1 };
+  }
+  if (prefix <= 0xb7) {
+    const len = prefix - 0x80;
+    return { item: data.subarray(offset + 1, offset + 1 + len), next: offset + 1 + len };
+  }
+  if (prefix <= 0xbf) {
+    const lenLen = prefix - 0xb7;
+    let len = 0;
+    for (let j = 0; j < lenLen; j += 1) len = (len << 8) | (data[offset + 1 + j] ?? 0);
+    return {
+      item: data.subarray(offset + 1 + lenLen, offset + 1 + lenLen + len),
+      next: offset + 1 + lenLen + len,
+    };
+  }
+
+  // Lists: 0xc0–0xf7 short, 0xf8+ long.
+  let payloadStart: number;
+  let payloadLen: number;
+  if (prefix <= 0xf7) {
+    payloadLen = prefix - 0xc0;
+    payloadStart = offset + 1;
+  } else {
+    const lenLen = prefix - 0xf7;
+    payloadLen = 0;
+    for (let j = 0; j < lenLen; j += 1) payloadLen = (payloadLen << 8) | (data[offset + 1 + j] ?? 0);
+    payloadStart = offset + 1 + lenLen;
+  }
+  const items: RlpItem[] = [];
+  let cursor = payloadStart;
+  const end = payloadStart + payloadLen;
+  while (cursor < end) {
+    const decoded = decodeRlpItem(data, cursor);
+    items.push(decoded.item);
+    cursor = decoded.next;
+  }
+  return { item: items, next: end };
+}
+
+function bigintOf(item: RlpItem): bigint {
+  if (Array.isArray(item)) throw new Error('RLP: expected a byte string, got a list.');
+  let value = 0n;
+  for (const byte of item) value = (value << 8n) | BigInt(byte);
+  return value;
+}
+
+/** Decodes a signed 0x02 envelope and returns its signature triplet. */
+function extractSignature(rawHex: string): { yParity: bigint; r: bigint; s: bigint } {
   const bytes = hexToBytes(rawHex);
-  // Strip the 0x02 type byte and the RLP list header.
-  const payload = stripListHeader(bytes.subarray(1));
-
-  const fields = splitFields(payload);
-  if (fields.length < 12) {
-    // Fallback: scan for the last two 0xa0-prefixed items.
-    return extractFromEnd(payload);
+  const envelope = decodeRlpItem(bytes, 1);
+  if (!Array.isArray(envelope.item) || envelope.item.length !== 12) {
+    throw new Error('Expected a 12-field EIP-1559 envelope.');
   }
-  const rField = fields[10] ?? payload;
-  const sField = fields[11] ?? payload;
-  return { r: trimLeadingZero(rField), s: trimLeadingZero(sField) };
-}
-
-function stripListHeader(data: Uint8Array): Uint8Array {
-  const prefix = data[0];
-  if (prefix === undefined) return new Uint8Array(0);
-  if (prefix <= 0xf7) return data.subarray(1); // short list
-  const count = (prefix ?? 0) - 0xf7;
-  return data.subarray(1 + count);
-}
-
-function splitFields(data: Uint8Array): Uint8Array[] {
-  if (data.length === 0) return [];
-  const fields: Uint8Array[] = [];
-  let i = 0;
-  while (i < data.length) {
-    const prefix = data[i];
-    if (prefix === undefined) break;
-    if (prefix < 0x80) {
-      fields.push(new Uint8Array([prefix]));
-      i += 1;
-    } else if (prefix <= 0xb7) {
-      const len = prefix - 0x80;
-      fields.push(data.subarray(i + 1, i + 1 + len));
-      i += 1 + len;
-    } else {
-      const count = prefix - 0xb7;
-      let len = 0;
-      for (let j = 0; j < count; j += 1) len = (len << 8) | (data[i + 1 + j] ?? 0);
-      fields.push(data.subarray(i + 1 + count, i + 1 + count + len));
-      i += 1 + count + len;
-    }
-  }
-  return fields;
-}
-
-function extractFromEnd(payload: Uint8Array): { r: Uint8Array; s: Uint8Array } {
-  // From the end, find the last two 0xa0-prefixed (or 0xa1-prefixed) items.
-  let i = payload.length - 1;
-  const items: Uint8Array[] = [];
-  while (i >= 0) {
-    const prefix = payload[i];
-    if (prefix === undefined) break;
-    if (prefix === 0xa0) {
-      items.push(payload.subarray(i + 1, i + 33));
-      i -= 33;
-    } else if (prefix === 0xa1) {
-      items.push(payload.subarray(i + 2, i + 34).subarray(1)); // skip leading 0x00
-      i -= 34;
-    } else {
-      // Single-byte item or short string.
-      const len = prefix <= 0xb7 ? Math.max(1, prefix - 0x80) : 1;
-      i -= (prefix <= 0xb7 ? 1 + len : 1 + (prefix - 0xb7) + len);
-    }
-  }
-  items.reverse();
-  return { r: items[items.length - 2] ?? new Uint8Array(32), s: items[items.length - 1] ?? new Uint8Array(32) };
-}
-
-function trimLeadingZero(bytes: Uint8Array): Uint8Array {
-  return bytes.length > 32 && bytes[0] === 0 ? bytes.subarray(1) : bytes;
+  return {
+    yParity: bigintOf(envelope.item[9]!),
+    r: bigintOf(envelope.item[10]!),
+    s: bigintOf(envelope.item[11]!),
+  };
 }

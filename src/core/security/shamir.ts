@@ -207,8 +207,12 @@ export function combineShares(
     }
   }
 
-  // Use the first `threshold` shares for reconstruction.
+  // Duplicate x-values make the Lagrange denominators zero — catch it with a
+  // clear message instead of surfacing "Division by zero in GF(256)".
   const usedX = xValues.slice(0, threshold);
+  if (new Set(usedX).size !== usedX.length) {
+    throw new Error('Duplicate share x-values: each share may only be used once.');
+  }
   const usedY = yMatrices.slice(0, threshold);
 
   // Compute Lagrange coefficients for each share.
@@ -246,6 +250,12 @@ function hexToBytes(hex: string): Uint8Array {
   const clean = hex.replace(/\s+/g, '');
   if (clean.length % 2 !== 0) {
     throw new Error(`Odd-length hex string: ${hex}`);
+  }
+  // Reject anything that is not exact hex pairs: parseInt('zz', 16) is NaN
+  // (which becomes a silent 0 byte) and parseInt('1g', 16) is 1 — either way a
+  // typo'd share would reconstruct a silently WRONG secret instead of erroring.
+  if (!/^([0-9a-fA-F]{2})*$/.test(clean)) {
+    throw new Error('Share contains characters that are not hexadecimal.');
   }
   const out = new Uint8Array(clean.length / 2);
   for (let i = 0; i < out.length; i += 1) {

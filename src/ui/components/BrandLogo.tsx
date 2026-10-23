@@ -1,10 +1,9 @@
 import type { JSX } from 'react';
-import logoIcon from '@/ui/assets/icons/logo.svg';
+import logoIcon from '@/ui/assets/icons/logo.png';
 
 /**
- * Brand logo for in-app headers. Renders the bundled Veilpay logo SVG
- * (`mainlogo.svg` from the brand kit), sized for the header (`md`) or the
- * welcome screen (`lg`).
+ * Brand logo for in-app headers and cards. Renders the official Veilpay gold shield
+ * logo PNG with a transparent background.
  */
 export function BrandLogo({
   size = 'md',

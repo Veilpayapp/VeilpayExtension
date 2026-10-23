@@ -391,6 +391,12 @@ export function deriveAssociatedTokenAddress(owner: string, mint: string): strin
 // ---------------------------------------------------------------------------
 
 function toLE64(value: bigint): Uint8Array {
+  // Fail closed: a negative amount would otherwise encode as a huge two's-
+  // complement u64 (~1.8e19), and ≥ 2^64 would silently lose its high bits —
+  // in both cases the wire bytes would not match the approved amount.
+  if (value < 0n || value > 0xffffffffffffffffn) {
+    throw new RangeError(`Lamport amount out of u64 range: ${value}.`);
+  }
   const out = new Uint8Array(8);
   for (let i = 0; i < 8; i += 1) {
     out[i] = Number(value & 0xffn);
@@ -533,6 +539,11 @@ export function signSolanaTransaction(
  * Signs a raw message (already decoded from base58 by the caller) per Phantom's
  * `signMessage` convention: a bare ed25519 signature over the message bytes
  * (no domain separator). Returns the base58 signature.
+ *
+ * BECAUSE there is no domain separator, a signature over bytes that ARE a
+ * serialized transaction message is a valid transaction signature — callers
+ * must run `looksLikeTransactionMessage` first and refuse those, or this is a
+ * transaction-signing oracle behind a benign "sign message" prompt.
  */
 export function signSolanaMessage(
   message: Uint8Array,
@@ -543,6 +554,93 @@ export function signSolanaMessage(
   }
   const signature = ed25519.sign(message, privateKey);
   return { signature: base58.encode(signature) };
+}
+
+/**
+ * Whether `message` parses as a structurally complete Solana transaction
+ * message (legacy or v0) that names `walletAddress` as a required signer.
+ *
+ * This is the anti-oracle check for `signMessage`: a bare ed25519 signature
+ * over a well-formed transaction message is a broadcastable transaction
+ * signature, so such payloads must never reach `signSolanaMessage`. Strict
+ * whole-buffer parsing is what makes the check safe — a malformed message
+ * yields a transaction no node accepts, so it has no oracle value and is
+ * treated as an ordinary message (returns false).
+ */
+export function looksLikeTransactionMessage(
+  message: Uint8Array,
+  walletAddress: string,
+): boolean {
+  // Versioned-message marker up front so the v0 lookup table tail is parsed
+  // only when the buffer actually claims to be versioned.
+  const versioned = (message[0] ?? 0) >= 0x80;
+  try {
+    // Versioned messages open with 0x80 | version (only v0 exists today).
+    let offset = versioned ? 1 : 0;
+    // Header: [numRequiredSignatures][readonlySigned][readonlyUnsigned].
+    const numRequiredSignatures = message[offset];
+    if (numRequiredSignatures === undefined || numRequiredSignatures < 1) return false;
+    offset += 3;
+
+    const keyCount = decodeCompactU16(message, offset);
+    offset += keyCount.consumed;
+    if (numRequiredSignatures > keyCount.value) return false;
+    const keyBytes: Uint8Array[] = [];
+    for (let i = 0; i < keyCount.value; i += 1) {
+      const key = message.subarray(offset, offset + 32);
+      if (key.length !== 32) return false;
+      keyBytes.push(key);
+      offset += 32;
+    }
+
+    // Recent blockhash.
+    if (message.length < offset + 32) return false;
+    offset += 32;
+
+    // Instructions.
+    const ixCount = decodeCompactU16(message, offset);
+    offset += ixCount.consumed;
+    for (let i = 0; i < ixCount.value; i += 1) {
+      // programIdIndex
+      if (offset >= message.length) return false;
+      offset += 1;
+      const accounts = decodeCompactU16(message, offset);
+      offset += accounts.consumed + accounts.value;
+      const data = decodeCompactU16(message, offset);
+      offset += data.consumed + data.value;
+      if (offset > message.length) return false;
+    }
+
+    // v0 address-table lookups follow the instructions.
+    if (versioned) {
+      const lookupCount = decodeCompactU16(message, offset);
+      offset += lookupCount.consumed;
+      for (let i = 0; i < lookupCount.value; i += 1) {
+        if (message.length < offset + 32) return false;
+        offset += 32;
+        const writable = decodeCompactU16(message, offset);
+        offset += writable.consumed + writable.value;
+        const readonly = decodeCompactU16(message, offset);
+        offset += readonly.consumed + readonly.value;
+        if (offset > message.length) return false;
+      }
+    }
+
+    // A well-formed message consumes the buffer exactly.
+    if (offset !== message.length) return false;
+
+    // The oracle only matters if OUR key would sign it.
+    const walletKey = base58.decode(walletAddress);
+    for (let i = 0; i < numRequiredSignatures; i += 1) {
+      const key = keyBytes[i];
+      if (key !== undefined && key.length === walletKey.length && key.every((b, j) => b === walletKey[j])) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 function concat(arrays: Uint8Array[]): Uint8Array {

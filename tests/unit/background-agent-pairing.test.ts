@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { resetConnectionForTests } from '@/core/vault/storage';
+import { getActiveGrantByOrigin } from '@/core/vap/grant';
 
 /**
  * Regression test for the reported failure: "Could not connect — This relay
@@ -237,5 +239,69 @@ describe('agent.relay.pairing-code self-healing', () => {
     expect((third.data as { pairingCode: string }).pairingCode).toBe('C0DE-0002');
     const saved = store.get('agent:bridge') as Record<string, unknown>;
     expect(saved.walletId).toBe('wallet-2');
+  });
+});
+
+describe('agent pairing creates the standing grant', () => {
+  // The DB is deliberately NOT deleted between these tests: fire-and-forget
+  // audit writes from the previous test would land on a deleted database and
+  // fail with InvalidStateError. Grant replacement semantics (one active grant
+  // per client) make a shared DB deterministic anyway.
+  beforeEach(() => {
+    resetConnectionForTests();
+  });
+
+  it('relay registration mints the default auto-approval grant for the agent', async () => {
+    await loadBackground();
+
+    const response = await request('agent.relay.register', { baseUrl: BASE });
+    expect(response.ok).toBe(true);
+
+    const grant = await getActiveGrantByOrigin('mcp:veilpay');
+    expect(grant).not.toBeNull();
+    expect(grant?.caps.maxPerOperation).toBe('10000000000000000');
+    expect(grant?.caps.maxPerWindow).toBe('100000000000000000');
+    // The threshold sits at the window cap, so nothing within the caps ever
+    // prompts — the grant is what makes in-cap agent payments silent.
+    expect(grant?.caps.approvalThreshold).toBe('100000000000000000');
+    expect(grant?.caps.allowedChains).toEqual(['evm', 'solana', 'stellar']);
+    expect(grant?.caps.allowedOps).toEqual(['native.transfer', 'x402.pay']);
+  });
+
+  it('local pairing mints the same grant', async () => {
+    await loadBackground();
+
+    const response = await request('agent.configure', {
+      mode: 'local',
+      baseUrl: 'http://127.0.0.1:8765',
+      token: 'test-token-1234567890',
+    });
+    expect(response.ok).toBe(true);
+
+    const grant = await getActiveGrantByOrigin('mcp:veilpay');
+    expect(grant).not.toBeNull();
+    expect(grant?.caps.maxPerOperation).toBe('10000000000000000');
+  });
+
+  it('re-pairing refreshes the grant instead of stacking a second one', async () => {
+    await loadBackground();
+    const first = await request('agent.configure', {
+      mode: 'local',
+      baseUrl: 'http://127.0.0.1:8765',
+      token: 'test-token-1234567890',
+    });
+    expect(first.ok).toBe(true);
+    const firstGrant = await getActiveGrantByOrigin('mcp:veilpay');
+
+    const second = await request('agent.configure', {
+      mode: 'local',
+      baseUrl: 'http://127.0.0.1:8765',
+      token: 'test-token-abcdefghij',
+    });
+    expect(second.ok).toBe(true);
+    const secondGrant = await getActiveGrantByOrigin('mcp:veilpay');
+
+    expect(secondGrant).not.toBeNull();
+    expect(secondGrant?.id).not.toBe(firstGrant?.id);
   });
 });

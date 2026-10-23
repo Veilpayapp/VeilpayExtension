@@ -210,7 +210,9 @@ class EvmService implements ChainService {
   }
 
   async getSequence(address: string): Promise<bigint> {
-    const response = await this.call('eth_getTransactionCount', [address, 'latest']);
+    // 'pending', not 'latest': a second send issued while the first is still
+    // in the mempool must reuse the NEXT nonce, or it fails as a duplicate.
+    const response = await this.call('eth_getTransactionCount', [address, 'pending']);
     if (typeof response !== 'string') {
       throw new Error(`eth_getTransactionCount returned non-string: ${typeof response}`);
     }
@@ -274,11 +276,21 @@ class EvmService implements ChainService {
       const url = endpoints[idx];
       if (url === undefined || url.length === 0) continue;
       try {
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-        });
+        // Bounded wait: a hung endpoint must fail over to the next one rather
+        // than hang the send/sign flow forever (same pattern as RpcFeeSource).
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 15_000);
+        let response: Response;
+        try {
+          response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timer);
+        }
 
         if (!response.ok) {
           throw new Error(`EVM RPC ${method} failed: HTTP ${response.status}`);
@@ -504,16 +516,25 @@ class SolanaService implements ChainService {
   }
 
   private async call(method: string, params: unknown[]): Promise<unknown> {
-    const response = await fetch(this.rpcUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method,
-        params,
-      }),
-    });
+    // Bounded wait: a hung endpoint must not hang the send/sign flow forever.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    let response: Response;
+    try {
+      response = await fetch(this.rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method,
+          params,
+        }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
 
     if (!response.ok) {
       throw new Error(`Solana RPC ${method} failed: HTTP ${response.status}`);

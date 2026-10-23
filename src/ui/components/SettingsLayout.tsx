@@ -4,6 +4,8 @@ import { useWallet } from '@/ui/store/useWallet';
 import type { ChainId } from '@/core/messaging/protocol';
 import { Button } from '@/ui/components/Button';
 import { Card } from '@/ui/components/Card';
+import { Glyph } from '@/ui/components/Glyph';
+import { useTheme } from '@/ui/theme/useTheme';
 import { SecuritySetup } from '@/ui/components/SecuritySetup';
 import { listPermissions, revokeOrigin, type OriginPermission } from '@/core/permissions';
 import { getCustomNetworks, addCustomNetwork, removeCustomNetwork, type CustomNetwork } from '@/core/networks';
@@ -70,7 +72,7 @@ export function SettingsLayout({ onClose }: { onClose?: () => void }) {
   ];
 
   return (
-    <div className="flex min-h-screen bg-surface-base">
+    <div className="flex min-h-screen bg-surface-base text-content-primary">
       {/* Sidebar */}
       <nav className="flex w-48 flex-col gap-1 border-r border-surface-600 p-4">
         <h1 className="font-display text-base font-bold text-content-primary mb-4">Veilpay</h1>
@@ -128,10 +130,43 @@ export function SettingsLayout({ onClose }: { onClose?: () => void }) {
 
 function GeneralSettings() {
   const { vaultState, lock } = useWallet();
+  const { theme, setTheme } = useTheme();
 
   return (
     <div className="flex flex-col gap-4">
       <h2 className="font-display text-lg font-semibold text-content-primary">{t('settings.general')}</h2>
+
+      <Card title="Appearance">
+        <p className="font-body text-sm text-content-secondary mb-3">
+          Choose wallet interface theme: Light or Dark mode.
+        </p>
+        <div className="flex gap-2.5">
+          <button
+            type="button"
+            onClick={() => setTheme('light')}
+            className={`flex items-center gap-2 rounded-xl border px-4 py-2 font-mono text-xs font-semibold transition-all ${
+              theme === 'light'
+                ? 'border-accent-500 bg-accent-500/15 text-accent-500 font-bold shadow-sm'
+                : 'border-surface-600 bg-surface-700 text-content-secondary hover:text-content-primary'
+            }`}
+          >
+            <Glyph name="sun" className="h-4 w-4" />
+            <span>Light</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setTheme('dark')}
+            className={`flex items-center gap-2 rounded-xl border px-4 py-2 font-mono text-xs font-semibold transition-all ${
+              theme === 'dark'
+                ? 'border-accent-500 bg-accent-500/15 text-accent-500 font-bold shadow-sm'
+                : 'border-surface-600 bg-surface-700 text-content-secondary hover:text-content-primary'
+            }`}
+          >
+            <Glyph name="moon" className="h-4 w-4" />
+            <span>Dark</span>
+          </button>
+        </div>
+      </Card>
 
       <Card title={t('settings.walletState')}>
         <p className="font-body text-sm text-content-secondary">

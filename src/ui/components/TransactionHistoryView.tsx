@@ -312,7 +312,7 @@ function TransactionDetailsModal({ tx, onClose }: { tx: IndexerTx; onClose: () =
 
         {url !== null && (
           <div className="mt-4">
-            <Button fullWidth variant="secondary" onClick={() => window.open(url, '_blank')}>
+            <Button fullWidth variant="secondary" onClick={() => window.open(url, '_blank', 'noopener,noreferrer')}>
               <Glyph name="external" className="h-4 w-4" /> View on explorer
             </Button>
           </div>

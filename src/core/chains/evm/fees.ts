@@ -36,6 +36,18 @@ export const SEPOLIA_FEE_ENDPOINTS: string[] = [
  */
 
 const MIN_PRIORITY_FEE = 1_000_000_000n; // 1 gwei
+/**
+ * Sanity ceilings on RPC-supplied fee data. The RPC is untrusted: a malicious
+ * or compromised endpoint could otherwise report an absurd tip (paid IN FULL
+ * to the block producer) or base fee (raising the user's total cap). Real
+ * Ethereum tips run 1–5 gwei and base fees have never approached 1,000 gwei;
+ * clamping beyond these ceilings can only leave a transaction underpriced
+ * (re-submittable), never overpaying.
+ */
+const MAX_PRIORITY_FEE = 100_000_000_000n; // 100 gwei
+const MAX_BASE_FEE = 10_000_000_000_000n; // 10,000 gwei
+/** Ethereum's block gas limit is ~30–36M; nothing a wallet signs needs more. */
+const MAX_GAS_LIMIT = 30_000_000n;
 
 export interface EvmFeeEstimate {
   /** Suggested tip to the block producer, in wei. */
@@ -165,18 +177,22 @@ export async function estimateTransferFee(
   valueWei: bigint,
   data?: Uint8Array,
 ): Promise<EvmFeeEstimate> {
-  const [tip, baseFee, gasLimit] = await Promise.all([
+  const [tipRaw, baseFeeRaw, gasLimitRaw] = await Promise.all([
     source.maxPriorityFeePerGas(),
     source.baseFeePerGas(),
     source.estimateGas(from, to, valueWei, data),
   ]);
 
-  const maxPriorityFeePerGas = tip < MIN_PRIORITY_FEE ? MIN_PRIORITY_FEE : tip;
+  // Clamp untrusted RPC values to sane bounds (see the ceiling notes above).
+  const tip = tipRaw < MIN_PRIORITY_FEE ? MIN_PRIORITY_FEE : tipRaw > MAX_PRIORITY_FEE ? MAX_PRIORITY_FEE : tipRaw;
+  const baseFee = baseFeeRaw > MAX_BASE_FEE ? MAX_BASE_FEE : baseFeeRaw;
+  const gasLimit = gasLimitRaw > MAX_GAS_LIMIT ? MAX_GAS_LIMIT : gasLimitRaw;
+
   // 2x the base fee plus the tip gives headroom against a rising base fee.
-  const maxFeePerGas = baseFee * 2n + maxPriorityFeePerGas;
+  const maxFeePerGas = baseFee * 2n + tip;
 
   return {
-    maxPriorityFeePerGas,
+    maxPriorityFeePerGas: tip,
     maxFeePerGas,
     gasLimit,
     totalFeeWei: gasLimit * maxFeePerGas,

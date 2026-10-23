@@ -11,10 +11,14 @@ import { encodeInteger, encodeList, type RlpItem } from './rlp';
  *   [chainId, nonce, maxPriorityFeePerGas, maxFeePerGas, gasLimit, to, value,
  *    data, accessList, yParity, r, s]
  *
- * To sign, the last three fields (the signature) are left as `0` in the payload,
- * the whole thing is keccak-256 hashed, and that digest is signed with ECDSA over
- * secp256k1. The resulting `r`, `s`, and `yParity` (recovery parity) are then
- * re-encoded into the full envelope.
+ * To sign, the NINE unsigned fields alone are hashed:
+ * keccak-256(0x02 || rlp([chainId, nonce, maxPriorityFeePerGas, maxFeePerGas,
+ * gasLimit, to, value, data, accessList])) — the signature fields are NOT
+ * part of the digest at all (that zeroed-signature-fields pattern is EIP-155
+ * legacy transactions; applying it to a type-2 envelope yields a digest no
+ * node accepts, so every such transaction is rejected as an invalid sender).
+ * The resulting `r`, `s`, and `yParity` (recovery parity) are then appended
+ * to form the full 12-field broadcast envelope.
  *
  * Everything here is pure: it takes the unsigned fields and a raw private key,
  * and returns the signed, broadcast-ready hex string. It never touches storage,
@@ -81,8 +85,11 @@ function accessListItem(): RlpItem {
 /**
  * Builds the RLP payload for a signed or unsigned 1559 transaction.
  *
- * When `signature` is omitted, `yParity/r/s` are zeroed so the payload can be
- * hashed to produce the message digest. When provided, they are included.
+ * When `signature` is omitted the payload is exactly the NINE unsigned fields
+ * — that list, type-prefixed and hashed, IS the EIP-1559 signing digest, and
+ * it must match byte-for-byte what a node re-derives from the broadcast
+ * envelope's first nine fields. When `signature` is provided, yParity/r/s are
+ * appended to form the 12-field broadcast envelope.
  */
 function serializeEnvelope(
   tx: UnsignedEvmTransaction,
@@ -106,8 +113,6 @@ function serializeEnvelope(
       encodeInteger(signature.r),
       encodeInteger(signature.s),
     );
-  } else {
-    fields.push(encodeInteger(0n), encodeInteger(0n), encodeInteger(0n));
   }
 
   // The 0x02 type byte prefixes the RLP list of the payload.

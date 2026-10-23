@@ -1,17 +1,18 @@
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { t } from '@/i18n';
 import { useWallet, type AccountView } from '@/ui/store/useWallet';
 import { Button } from '@/ui/components/Button';
 import { Card } from '@/ui/components/Card';
-
-const CLIPBOARD_CLEAR_MS = 30_000;
+import { copySecretToClipboard } from '@/ui/lib/clipboard';
 
 /**
  * Export key modal.
  *
  * Requires the vault to be unlocked (enforced by the background handler), then
  * reveals the chain's private key. The key is copied to the clipboard and
- * auto-cleared after 30 seconds.
+ * auto-cleared after 30 seconds. The wipe timer lives in the clipboard module,
+ * NOT in this component: closing the modal within the window must not cancel
+ * the wipe, or the key would sit on the system clipboard indefinitely.
  */
 export function ExportKeyModal({
   account,
@@ -25,42 +26,14 @@ export function ExportKeyModal({
   const [copied, setCopied] = useState(false);
   const [key, setKey] = useState<string | null>(null);
   const [address, setAddress] = useState<string | null>(null);
-  const clearTimer = useRef<number | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (clearTimer.current !== null) {
-        window.clearTimeout(clearTimer.current);
-      }
-    };
-  }, []);
 
   const copyToClipboard = async (value: string) => {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(true);
-      clearTimer.current = window.setTimeout(() => {
-        // Only clear the clipboard if it still holds our key: the user may have
-        // copied something else during the 30s window, and wiping that would be
-        // destructive. Comparing avoids touching an unrelated value.
-        void navigator.clipboard
-          .readText()
-          .then((current) => {
-            if (current === value) {
-              return navigator.clipboard.writeText('');
-            }
-            return undefined;
-          })
-          .catch(() => {
-            // Clipboard read can be blocked (no permission); on failure, best
-            // effort is to clear what we wrote. Overwriting an unknown value is
-            // the lesser evil to keeping a private key on the system clipboard.
-            return navigator.clipboard.writeText('');
-          })
-          .finally(() => setCopied(false));
-      }, CLIPBOARD_CLEAR_MS);
-    } catch {
-      setCopied(false);
+    const ok = await copySecretToClipboard(value);
+    setCopied(ok);
+    if (ok) {
+      // Visual acknowledgement only; the clipboard wipe itself is armed inside
+      // copySecretToClipboard and survives this component unmounting.
+      window.setTimeout(() => setCopied(false), 2_000);
     }
   };
 

@@ -107,6 +107,35 @@ describe('validateChallenge', () => {
     expect(result.valid).toBe(false);
     expect(isSeenNonce('nonce-1')).toBe(false);
   });
+
+  it('rejects a protocol-relative resource URL (cross-origin bypass)', () => {
+    const result = validateChallenge(
+      validChallenge({ resource: '//evil.example/pay' }),
+      'https://service.example',
+      NOW,
+    );
+    expect(result.valid).toBe(false);
+    if (!result.valid) expect(result.reason).toMatch(/does not match/i);
+  });
+
+  it('accepts a path with a double slash that stays on the page origin', () => {
+    const result = validateChallenge(
+      validChallenge({ resource: '/api//double-slash' }),
+      'https://service.example',
+      NOW,
+    );
+    expect(result.valid).toBe(true);
+  });
+
+  it('rejects a challenge whose validity window exceeds the TTL cap', () => {
+    const result = validateChallenge(
+      validChallenge({ expiry: NOW + 60 * 60_000 }), // 1 hour out
+      'https://service.example',
+      NOW,
+    );
+    expect(result.valid).toBe(false);
+    if (!result.valid) expect(result.reason).toMatch(/validity window/i);
+  });
 });
 
 describe('nonce LRU', () => {

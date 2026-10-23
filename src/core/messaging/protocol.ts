@@ -213,6 +213,21 @@ export const PRIVILEGED_KINDS: readonly RequestKind[] = [
   'spp.deposit',
   'spp.transfer',
   'spp.withdraw',
+  // WalletConnect: pairing opens a standing session to a dapp, approving a
+  // proposal hands it the wallet's accounts, and `wc.request.resolve(approve)`
+  // SIGNS AND BROADCASTS with the vault key — the exact same blast radius as
+  // `tx.resolve`, which has always been privileged. A compromised content
+  // script could otherwise pair its own dapp and approve its own drain
+  // requests with zero user interaction. The pending/list reads join them:
+  // they disclose session metadata and are only ever polled by our own UI.
+  'wc.pair',
+  'wc.proposal.pending',
+  'wc.proposal.approve',
+  'wc.proposal.reject',
+  'wc.session.list',
+  'wc.session.disconnect',
+  'wc.request.pending',
+  'wc.request.resolve',
 ] as const;
 
 export function isPrivilegedKind(kind: RequestKind): boolean {
@@ -278,8 +293,13 @@ export const IndexerHistoryRequest = baseEnvelope.extend({
  */
 const Passphrase = z.string().min(1).max(1024);
 
-/** A non-negative integer as a decimal string (`bigint` cannot cross the bus). */
-const Decimal = z.string().regex(/^\d+$/, 'Amount must be a non-negative integer.');
+/** A non-negative integer as a decimal string (`bigint` cannot cross the bus).
+ *  Capped at 78 digits (uint256's maximum) so a maliciously long string cannot
+ *  force a megabyte-scale BigInt conversion in the service worker. */
+const Decimal = z
+  .string()
+  .max(78, 'Amount has too many digits.')
+  .regex(/^\d+$/, 'Amount must be a non-negative integer.');
 const MaxUint256 = 2n ** 256n - 1n;
 
 /**
@@ -291,6 +311,9 @@ const MaxUint256 = 2n ** 256n - 1n;
  */
 const NativeDecimal = z
   .string()
+  // 78 whole digits (uint256) + decimal point + 30 fractional digits max —
+  // bounds the BigInt conversion the refine below performs.
+  .max(110, 'Amount has too many digits.')
   .regex(/^(0|[1-9]\d*)(\.\d+)?$/, 'Amount must be a non-negative decimal number.')
   .refine(
     (value) => {
@@ -837,6 +860,10 @@ export const WcRequestResolveRequest = baseEnvelope.extend({
   kind: z.literal('wc.request.resolve'),
   payload: z.object({
     action: z.enum(['approve', 'deny']),
+    /** Binds the decision to the exact request the UI displayed. When present,
+     *  a mismatch with the currently pending request fails the resolve instead
+     *  of approving whatever happens to be pending (consent integrity). */
+    requestId: z.number().int().nonnegative().optional(),
   }),
 });
 
@@ -852,12 +879,37 @@ export const AgentStatusRequest = baseEnvelope.extend({
   payload: z.object({}),
 });
 
+/**
+ * The agent bridge credential travels as a bearer token/secret on every poll —
+ * over plain HTTP it would be readable on the wire. HTTPS is required for
+ * everything except loopback (127.0.0.1/::1/localhost), where the OS keeps the
+ * socket off the network.
+ */
+const BridgeBaseUrl = z
+  .string()
+  .min(1)
+  .max(2048)
+  .refine(
+    (value) => {
+      try {
+        const url = new URL(value);
+        if (url.protocol === 'https:') return true;
+        if (url.protocol !== 'http:') return false;
+        const host = url.hostname.toLowerCase();
+        return host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]';
+      } catch {
+        return false;
+      }
+    },
+    { message: 'Bridge URL must be https, or http on loopback only.' },
+  );
+
 export const AgentConfigureRequest = baseEnvelope.extend({
   kind: z.literal('agent.configure'),
   payload: z.object({
     mode: z.enum(['local', 'relay']),
     /** Origin only: `http://127.0.0.1:8765` or `https://relay.example`. */
-    baseUrl: z.string().min(1).max(2048),
+    baseUrl: BridgeBaseUrl,
     /** Local: pairing token. Relay: the wallet secret issued at registration. */
     token: z.string().min(16).max(256),
     /** Relay only: identifies this wallet's queue on the server. */
@@ -873,7 +925,7 @@ export const AgentConfigureRequest = baseEnvelope.extend({
 export const AgentRelayRegisterRequest = baseEnvelope.extend({
   kind: z.literal('agent.relay.register'),
   payload: z.object({
-    baseUrl: z.string().min(1).max(2048),
+    baseUrl: BridgeBaseUrl,
   }),
 });
 
@@ -1356,7 +1408,7 @@ export interface ResponseData {
   'mnemonic.generate': { mnemonic: string };
   'security.status': { pinEnabled: boolean; webauthnEnabled: boolean };
   'security.pin.setup': { ok: boolean };
-  'security.pin.verify': { ok: boolean };
+  'security.pin.verify': { ok: boolean; retryAfterMs?: number };
   'security.webauthn.setup': { ok: boolean };
   /** Challenge hex for a WebAuthn ceremony, with the registered credential id. */
   'security.webauthn.challenge': { credentialId: string; challenge: string };

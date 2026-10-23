@@ -2,8 +2,8 @@
 /**
  * Generate Veilpay extension icons.
  *
- * Creates three icon sizes (16, 48, 128) with a solid amber circle (#F59E0B)
- * and a white "V" letter centered on each. Uses Sharp for efficient rendering.
+ * Resizes the official logo (src/ui/assets/icons/logo.png) into the three
+ * extension icon sizes (16, 48, 128). Uses Sharp for efficient rendering.
  */
 
 import sharp from 'sharp';
@@ -14,50 +14,25 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const iconsDir = join(__dirname, '..', 'public', 'icons');
 
-const AMBER = '#F59E0B';
-const WHITE = '#FFFFFF';
-
-// Define sizes with appropriate font scaling
-const sizes = [
-  { size: 16, fontSize: 10 },
-  { size: 48, fontSize: 30 },
-  { size: 128, fontSize: 80 },
-];
-
-async function generateIcon(size, fontSize) {
-  // Create SVG with centered circle and "V"
-  const svg = `
-    <svg width="${size}" height="${size}" xmlns="http://www.w3.org/2000/svg">
-      <circle cx="${size / 2}" cy="${size / 2}" r="${size / 2}" fill="${AMBER}"/>
-      <text
-        x="${size / 2}"
-        y="${size / 2}"
-        font-family="Arial, sans-serif"
-        font-size="${fontSize}"
-        font-weight="bold"
-        fill="${WHITE}"
-        text-anchor="middle"
-        dominant-baseline="central"
-      >V</text>
-    </svg>
-  `;
-
-  return sharp(Buffer.from(svg)).png().toBuffer();
-}
+// Define sizes for extension icons
+const sizes = [16, 48, 128];
+const sourceLogo = join(__dirname, '..', 'src', 'ui', 'assets', 'icons', 'logo.png');
 
 async function main() {
   try {
     await mkdir(iconsDir, { recursive: true });
     console.log(`Icons directory: ${iconsDir}`);
 
-    for (const { size, fontSize } of sizes) {
-      const buffer = await generateIcon(size, fontSize);
+    for (const size of sizes) {
       const path = join(iconsDir, `icon-${size}.png`);
-      await sharp(buffer).toFile(path);
-      console.log(`✓ Generated icon-${size}.png (${buffer.length} bytes)`);
+      const info = await sharp(sourceLogo)
+        .resize(size, size, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+        .png()
+        .toFile(path);
+      console.log(`✓ Generated icon-${size}.png (${info.size} bytes)`);
     }
 
-    console.log('\n✓ All icons generated successfully.');
+    console.log('\n✓ All icons generated successfully from official logo.png.');
   } catch (error) {
     console.error('Failed to generate icons:', error.message);
     process.exit(1);

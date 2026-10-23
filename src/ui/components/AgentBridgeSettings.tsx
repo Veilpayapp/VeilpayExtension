@@ -374,7 +374,10 @@ export function AgentBridgeSettings() {
         {statusPill}
 
         <p className="mb-3 font-body text-xs text-content-secondary">
-          Let an AI assistant pay from this wallet, within caps you set. Pick where you use it.
+          Let an AI assistant pay from this wallet. Connecting creates a standing grant:
+          payments up to <strong>0.01</strong> per payment and <strong>0.1</strong> per day
+          (native asset) run without asking; anything larger is refused. Manage or revoke it
+          anytime under <strong>VAP Grants</strong>.
         </p>
 
         <div className="mb-3 flex gap-2">
@@ -469,8 +472,8 @@ export function AgentBridgeSettings() {
           <li className="flex gap-2">
             <Glyph name="alert" className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
             <span>
-              This grants a spending capability. Keep your caps in <strong>VAP Grants</strong>{' '}
-              small, and disconnect when you are done.
+              Connecting grants a spending capability (0.01/payment, 0.1/day by default).
+              Review the caps in <strong>VAP Grants</strong>, and disconnect when you are done.
             </span>
           </li>
           <li className="flex gap-2">

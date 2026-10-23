@@ -2,9 +2,11 @@
  * Privacy commitments repository — typed access to the `privacyCommitments`
  * store (keyPath `commitmentId`, index `status`).
  *
- * Security rule: the `nullifier` field stores the commitment (hash), never a
- * preimage. Repositories must not be the place where secrets are introduced;
- * callers pushing preimages here are a bug.
+ * SECURITY: this store is Phase-3 scaffolding with NO LIVE WRITER, and its
+ * `secret` field would persist a note's spending preimage in PLAINTEXT. Do
+ * not add a writer without first encrypting the record with a vault-derived
+ * key (or deriving note secrets on demand and storing only the commitment).
+ * See the SECURITY DEBT note in `storage-types.ts`.
  */
 
 import { openStorageDatabase } from '@/core/vault/storage';

@@ -91,6 +91,38 @@ export function requiresApproval(
 
 const SPEND_KEY = 'vap:spendWindows';
 
+/**
+ * Per-grant async mutex (promise chain).
+ *
+ * The window check (`loadSpendWindow` → `requiresApproval`) and the debit
+ * (`recordSpend`) span multiple awaits, and a service worker interleaves
+ * concurrent handlers: without serialization, two concurrent auto-approved
+ * operations both evaluate against the same stale `amountSpent`, both pass
+ * `spent + amount > maxPerWindow`, and both settle — exceeding the window
+ * cap. Wrapping the whole check→settle→debit sequence in this lock makes the
+ * grant's rolling window authoritative under concurrency.
+ */
+const grantLocks = new Map<string, Promise<void>>();
+
+export async function withGrantLock<T>(grantId: string, fn: () => Promise<T>): Promise<T> {
+  const previous = grantLocks.get(grantId) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(() => current);
+  grantLocks.set(grantId, tail);
+  await previous;
+  try {
+    return await fn();
+  } finally {
+    release();
+    // Drop the chain link only if nobody queued behind us.
+    if (grantLocks.get(grantId) === tail) grantLocks.delete(grantId);
+  }
+}
+
+
 async function loadWindows(): Promise<SpendWindow[]> {
   const stored = await readMeta<SpendWindow[]>(SPEND_KEY);
   return Array.isArray(stored) ? stored : [];

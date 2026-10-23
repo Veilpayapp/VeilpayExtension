@@ -29,11 +29,13 @@ describe('Chain Services', () => {
       const balance = await service.getBalance('0x1234567890123456789012345678901234567890');
 
       expect(balance).toBe(BigInt('0x0de0b6b3a7640000'));
-      expect(fetchMock).toHaveBeenCalledWith('http://localhost:8545', {
+      expect(fetchMock).toHaveBeenCalledWith('http://localhost:8545', expect.objectContaining({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: expect.stringContaining('eth_getBalance'),
-      });
+        // The AbortSignal is the fetch timeout — asserted present, not exact.
+        signal: expect.any(AbortSignal),
+      }));
     });
 
     it('estimates gas via eth_estimateGas', async () => {

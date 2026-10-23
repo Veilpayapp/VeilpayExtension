@@ -292,7 +292,7 @@ interface WalletActions {
   /** WalletConnect: load pending request. */
   loadWcRequest(): Promise<void>;
   /** WalletConnect: resolve pending request (approve or deny). */
-  wcResolveRequest(action: 'approve' | 'deny'): Promise<boolean>;
+  wcResolveRequest(action: 'approve' | 'deny', requestId?: number): Promise<boolean>;
   /** Networks: load every selectable network and the per-chain selection. */
   loadNetworks(): Promise<void>;
   /** Networks: persist the selected network for a chain. Returns false when the id is invalid. */
@@ -973,10 +973,15 @@ export const useWallet = create<WalletState & WalletActions>((set, get) => ({
     }
   },
 
-  wcResolveRequest: async (action) => {
+  wcResolveRequest: async (action, requestId) => {
     set({ isLoading: true, error: null });
     try {
-      const { ok } = await send('wc.request.resolve', { action });
+      // Bind the decision to the exact pending request the UI displayed, so a
+      // request swapped in behind the user's back cannot ride their approval.
+      const { ok } = await send('wc.request.resolve', {
+        action,
+        ...(requestId !== undefined ? { requestId } : {}),
+      });
       if (ok) set({ pendingWcRequest: null });
       return ok;
     } catch (cause) {

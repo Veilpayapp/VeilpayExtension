@@ -81,9 +81,12 @@ implements this — `src/core/vap/` has grants with `maxPerOperation`,
 windows, an audit ledger, and a pure `requiresApproval` decision function.
 
 So the bridge is treated as **just another client**, exactly like a dapp:
-the same `requiresApproval` gate, the same prompt path when above threshold, the
-same audit trail. First payment prompts and can mint a grant; later payments
-under the cap run silently.
+the same `requiresApproval` gate, the same audit trail. **Pairing is the
+consent gesture**: connecting (local token or hosted relay) creates a default
+grant — 0.01 native units per payment, 0.1 per day, 90-day expiry, any chain —
+so in-cap payments run silently from the first one, and anything larger is
+refused by policy (the approval threshold sits at the window cap, so the grant
+never defers to a prompt). The grant is listed and revocable under VAP Grants.
 
 ## Iteration 5 — hardening the transport
 

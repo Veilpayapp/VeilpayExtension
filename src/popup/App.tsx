@@ -21,8 +21,10 @@ import { AddressBookPicker } from '@/ui/components/AddressBookPicker';
 import { CameraSetupCard } from '@/ui/components/CameraSetupCard';
 import { PrivacyView } from '@/ui/components/PrivacyView';
 import { baseToDecimal, nativeDecimalsFor } from '@/ui/lib/format';
+import { copySecretToClipboard } from '@/ui/lib/clipboard';
 import { runViewTransition, viewDirection, type ViewId } from '@/ui/lib/view-transition';
 import { networkFor, networkLabel } from '@/ui/components/Dashboard';
+import { useTheme } from '@/ui/theme/useTheme';
 import { vaultExists } from '@/core/vault/storage';
 import type { IndexerTx } from '@/core/chains/indexer-service';
 import type { StellarAssetInput, TokenInputType, ZkCapability } from '@/core/messaging/protocol';
@@ -117,6 +119,7 @@ export default function App() {
     selectedNetworks,
   } = useWallet();
 
+  const { isDark, toggleTheme } = useTheme();
   const [step, setStep] = useState<OnboardingStep>('welcome');
   const [phrase, setPhrase] = useState<string | null>(null);
   const [phraseRevealed, setPhraseRevealed] = useState(false);
@@ -312,7 +315,9 @@ export default function App() {
 
   const handleCopyPhrase = () => {
     if (phrase !== null) {
-      void navigator.clipboard.writeText(phrase);
+      // Secret clipboard helper: schedules a 30s wipe that survives any
+      // component unmount, so the phrase never lingers on the clipboard.
+      void copySecretToClipboard(phrase);
       setPhraseCopied(true);
       setTimeout(() => setPhraseCopied(false), 2000);
     }
@@ -350,6 +355,11 @@ export default function App() {
       setStep('success');
       setPassphrase1('');
       setPassphrase2('');
+      // The vault now holds the only copy of the phrase (encrypted). Keeping
+      // it in React state past this point extends its lifetime for no reason.
+      setPhrase(null);
+      setPhraseRevealed(false);
+      setPhraseCopied(false);
     }
   };
 
@@ -366,9 +376,11 @@ export default function App() {
       return;
     }
     const ok = await unlock(unlockPassphrase);
+    // Clear the passphrase from state either way — success or failure, the
+    // secret's job is done the moment the vault answers.
+    setUnlockPassphrase('');
     if (!ok) {
       setUnlockError('Wrong passphrase. Try again.');
-      setUnlockPassphrase('');
       setUnlockAttempt((attempt) => attempt + 1);
     }
   };
@@ -505,6 +517,11 @@ export default function App() {
     }
     const ok = await createVault(importPhrase.trim(), importPass1);
     if (ok) {
+      // Drop every secret from state immediately — the vault now holds the
+      // only copy (encrypted), and the popup must not retain it.
+      setImportPhrase('');
+      setImportPass1('');
+      setImportPass2('');
       if (step === 'import') {
         // Onboarding import: show success screen, then let user proceed
         setStep('success');
@@ -712,6 +729,7 @@ export default function App() {
             onClearError={clearError}
             onOpenScan={() => setScanModalOpen(true)}
             onTabSelect={handleTabSelect}
+            onPrivacy={() => navigate('privacy')}
           />
           {/* Mounted here too: the form's camera button must actually open
               the scanner, not just flip a flag no modal was listening to. */}
@@ -757,11 +775,11 @@ export default function App() {
     // Default: Dashboard matching Screenshot 1 & 2
     return (
       <main className="flex min-h-[600px] w-[400px] flex-col bg-surface-900 text-content-primary">
-        {/* Top Header matching Screenshot 1 */}
-        <header className="flex shrink-0 items-center justify-between border-b border-surface-800/80 px-4 py-3">
+        {/* Top Header matching Screenshot 5 */}
+        <header className="flex shrink-0 items-center justify-between border-b border-surface-600/80 px-4 py-3">
           <div className="flex items-center gap-2">
             <BrandLogo size="md" className="h-6 w-6" />
-            <h1 className="font-display text-base font-extrabold tracking-wider text-white uppercase">
+            <h1 className="font-display text-base font-extrabold tracking-wider text-content-primary uppercase">
               {t('brand')}
             </h1>
           </div>
@@ -772,7 +790,7 @@ export default function App() {
                 surprise. Hidden while the store has no deadline. */}
             {unlockedUntil !== null && (
               <span
-                className="flex items-center gap-1 rounded-lg border border-surface-700/80 bg-surface-800/80 px-2 py-1 font-mono text-[10px] text-content-tertiary"
+                className="flex items-center gap-1 rounded-lg border border-surface-600/80 bg-surface-800/80 px-2 py-1 font-mono text-[10px] text-content-tertiary"
                 title="Time until the wallet auto-locks"
               >
                 <Glyph name="lock" className="h-3 w-3 text-accent-500/70" />
@@ -781,20 +799,21 @@ export default function App() {
             )}
 
             {/* Account pill */}
-            <div className="flex items-center gap-1.5 rounded-lg border border-surface-700/80 bg-surface-800/80 px-2.5 py-1 text-xs font-mono text-content-primary">
+            <div className="flex items-center gap-1.5 rounded-lg border border-surface-600/80 bg-surface-800/80 px-2.5 py-1 text-xs font-mono text-content-primary">
               <Glyph name="user" className="h-3.5 w-3.5 text-accent-500" />
               <span>Account 1</span>
               <Glyph name="chevron-down" className="h-3 w-3 text-content-tertiary" />
             </div>
 
-            {/* Sunburst Settings button */}
+            {/* Theme Toggle Button matching Screenshot 5 */}
             <button
               type="button"
-              onClick={() => void chrome.runtime.openOptionsPage()}
-              aria-label="Settings"
-              className="rounded-lg p-1 text-content-secondary hover:bg-surface-800 hover:text-white transition-colors"
+              onClick={toggleTheme}
+              aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+              title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+              className="rounded-lg p-1 text-content-secondary hover:bg-surface-700 hover:text-content-primary transition-colors"
             >
-              <Glyph name="sun" className="h-4 w-4" />
+              <Glyph name={isDark ? 'sun' : 'moon'} className="h-4 w-4" />
             </button>
           </div>
         </header>
@@ -1200,6 +1219,7 @@ function SendForm({
   onClearError,
   onOpenScan,
   onTabSelect,
+  onPrivacy,
 }: {
   account: AccountView;
   sendTo: string;
@@ -1228,6 +1248,7 @@ function SendForm({
   onClearError: () => void;
   onOpenScan?: () => void;
   onTabSelect?: (tab: TacticalTab) => void;
+  onPrivacy?: () => void;
 }) {
   const isStellar = account.chain === 'stellar';
   const nativeSymbol =
@@ -1241,6 +1262,12 @@ function SendForm({
   const networkName = networkLabel(account.chain, networks, selectedNetworks).toUpperCase();
   const [addressBookOpen, setAddressBookOpen] = useState(false);
   const [tokenMenuOpen, setTokenMenuOpen] = useState(false);
+  const [showDetailedReceipt, setShowDetailedReceipt] = useState(false);
+  const [copiedSentTo, setCopiedSentTo] = useState(false);
+  const [showUsd, setShowUsd] = useState(false);
+  // The pre-broadcast review overlay: the last chance to verify the FULL
+  // recipient, amount, and fee before anything is signed or sent.
+  const [reviewOpen, setReviewOpen] = useState(false);
   /** Tokens registered for THIS chain, from the add-token registry. */
   const chainTokens = customTokens.filter((tok) => tok.chain === account.chain);
 
@@ -1371,9 +1398,12 @@ function SendForm({
     (recipientPrivacy === 'unavailable' ||
       (sendTo.trim().length > 0 && !recipientLooksStellar));
 
+  // A send never proceeds without a completed fee estimate: broadcasting blind
+  // (no fee shown, balance unchecked against the fee) is how wallets overpay
+  // or fail mid-flight. The estimate sets sendStatus to 'confirm'.
   const disableSend =
     isLoading ||
-    sendStatus === 'sending' ||
+    sendStatus !== 'confirm' ||
     sendTo.length === 0 ||
     sendAmount.length === 0 ||
     ready === false ||
@@ -1429,43 +1459,149 @@ function SendForm({
   };
 
   if (sendStatus === 'done' && sendHash !== null) {
+    if (showDetailedReceipt) {
+      return (
+        <div className="relative">
+          <span className="sr-only">Sent!</span>
+          <TransactionReceiptView
+            receipt={{
+              hash: sendHash,
+              chain: account.chain,
+              from: account.address,
+              to: sendReceiptTo ?? sendTo,
+              amount: sendAmount,
+              symbol: assetLabel,
+              networkName,
+              timestamp: new Date().toISOString(),
+            }}
+            onBack={() => setShowDetailedReceipt(false)}
+          />
+        </div>
+      );
+    }
+
+    const now = new Date();
+    const formattedDate = `${now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}, ${now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}`;
+    const destination = sendReceiptTo ?? sendTo;
+
     return (
-      <div className="relative">
+      <main className="flex min-h-[600px] w-[400px] flex-col items-center justify-between bg-surface-900 p-6 text-content-primary animate-fade-in">
         <span className="sr-only">Sent!</span>
-        <TransactionReceiptView
-          receipt={{
-            hash: sendHash,
-            chain: account.chain,
-            from: account.address,
-            // A private payment's real destination is the one-time address
-            // the background derived — show that, not the typed recipient.
-            to: sendReceiptTo ?? sendTo,
-            amount: sendAmount,
-            symbol: assetLabel,
-            networkName,
-            timestamp: new Date().toISOString(),
-          }}
-          onBack={onBack}
-        />
-      </div>
+
+        <div className="flex w-full flex-col items-center pt-4">
+          {/* Amber circular checkmark with glow matching Screenshot 1 */}
+          <div className="relative my-3 flex items-center justify-center">
+            <div className="absolute h-24 w-24 rounded-full bg-accent-500/15" />
+            <div className="relative flex h-20 w-20 items-center justify-center rounded-full bg-accent-500 shadow-[0_4px_24px_rgba(245,158,11,0.45)]">
+              <Glyph name="check" className="h-10 w-10 text-white stroke-[2.5]" />
+            </div>
+          </div>
+
+          <h1 className="mt-3 font-display text-xl font-bold tracking-wider text-content-primary uppercase">
+            PAYMENT SENT
+          </h1>
+          <p className="mt-1 text-center font-mono text-xs text-content-secondary">
+            Your transaction has been submitted to the network
+          </p>
+
+          {/* Details Card matching Screenshot 1 */}
+          <div className="mt-6 w-full rounded-2xl border border-surface-600/80 bg-surface-800/80 p-4 shadow-raised">
+            <div className="border-b border-surface-600/60 pb-3 text-center">
+              <span className="font-mono text-[10px] font-semibold tracking-wider text-content-tertiary uppercase">
+                TOTAL AMOUNT
+              </span>
+              <div className="mt-1 font-display text-2xl font-black text-content-primary">
+                {sendAmount} <span className="text-accent-500">{assetLabel}</span>
+              </div>
+            </div>
+
+            <div className="flex flex-col divide-y divide-surface-600/60 pt-1">
+              {/* TO */}
+              <div className="flex items-center justify-between py-2.5">
+                <span className="font-mono text-[10px] font-semibold tracking-wider text-content-tertiary uppercase">
+                  TO
+                </span>
+                <div className="flex items-center gap-1.5 font-mono text-xs text-content-primary">
+                  <span>
+                    {destination.length > 16
+                      ? `${destination.slice(0, 8)}...${destination.slice(-6)}`
+                      : destination}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void navigator.clipboard.writeText(destination);
+                      setCopiedSentTo(true);
+                      setTimeout(() => setCopiedSentTo(false), 2000);
+                    }}
+                    aria-label="Copy recipient address"
+                    className="rounded bg-accent-500/10 p-1 text-accent-500 transition-colors hover:bg-accent-500/20"
+                  >
+                    <Glyph name={copiedSentTo ? 'check' : 'copy'} className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* NETWORK */}
+              <div className="flex items-center justify-between py-2.5">
+                <span className="font-mono text-[10px] font-semibold tracking-wider text-content-tertiary uppercase">
+                  NETWORK
+                </span>
+                <span className="font-mono text-xs font-bold text-accent-500 uppercase">
+                  {networkName}
+                </span>
+              </div>
+
+              {/* DATE */}
+              <div className="flex items-center justify-between py-2.5">
+                <span className="font-mono text-[10px] font-semibold tracking-wider text-content-tertiary uppercase">
+                  DATE
+                </span>
+                <span className="font-mono text-xs text-content-secondary">
+                  {formattedDate}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Action Buttons matching Screenshot 1 */}
+        <div className="mt-auto flex w-full flex-col gap-2.5 pt-6">
+          <button
+            type="button"
+            onClick={() => setShowDetailedReceipt(true)}
+            className="w-full rounded-xl border border-surface-600 bg-surface-800 py-3 font-mono text-xs font-bold tracking-wider text-content-primary uppercase transition-colors hover:bg-surface-700 active:scale-98"
+          >
+            VIEW TRANSACTION
+          </button>
+
+          <button
+            type="button"
+            onClick={onBack}
+            className="w-full rounded-xl bg-accent-500 py-3 font-mono text-xs font-bold tracking-wider text-white uppercase shadow-md transition-transform hover:bg-accent-400 active:scale-98"
+          >
+            DONE
+          </button>
+        </div>
+      </main>
     );
   }
 
   return (
-    <main className="flex min-h-[600px] w-[400px] flex-col bg-surface-900 text-content-primary">
-      {/* Top Header matching Screenshot 4 */}
-      <header className="flex shrink-0 items-center justify-between border-b border-surface-800/80 px-4 py-3">
+    <main className="relative flex min-h-[600px] w-[400px] flex-col bg-surface-900 text-content-primary">
+      {/* Top Header matching Screenshot 3 & 4 */}
+      <header className="flex shrink-0 items-center justify-between border-b border-surface-600/60 px-4 py-3">
         <button
           type="button"
           onClick={onBack}
           aria-label="Back"
-          className="flex items-center gap-1.5 font-mono text-xs font-semibold text-content-secondary hover:text-white transition-colors"
+          className="flex items-center gap-1.5 font-mono text-xs font-semibold text-content-secondary transition-colors hover:text-content-primary"
         >
           <Glyph name="arrow-left" className="h-4 w-4" />
           <span>BACK</span>
         </button>
 
-        <h1 className="font-display text-sm font-bold tracking-widest text-white uppercase">
+        <h1 className="font-display text-sm font-bold tracking-widest text-content-primary uppercase">
           SEND PAYMENT
         </h1>
 
@@ -1497,7 +1633,46 @@ function SendForm({
           </div>
         </div>
 
-        {/* Recipient Address Section matching Screenshot 4 */}
+        {/* Mode pills row matching Screenshot 3: [Shield] [Send privately] [Unshield] */}
+        {isStellar && (
+          <div className="grid grid-cols-3 gap-2">
+            <button
+              type="button"
+              onClick={() => onPrivacy?.()}
+              className="flex items-center justify-center gap-1.5 rounded-xl border border-surface-600/80 bg-surface-800/80 py-2 font-mono text-[11px] font-semibold text-content-secondary transition-colors hover:border-surface-500 hover:text-content-primary active:scale-95"
+            >
+              <Glyph name="shield" className="h-3.5 w-3.5 text-accent-500" />
+              <span>Shield</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                onPrivateChange(!sendPrivate);
+                onClearError();
+              }}
+              className={`flex items-center justify-center gap-1.5 rounded-xl border py-2 font-mono text-[11px] transition-colors active:scale-95 ${
+                sendPrivate
+                  ? 'border-accent-500 bg-accent-500/15 font-bold text-accent-500 shadow-sm'
+                  : 'border-surface-600/80 bg-surface-800/80 font-semibold text-content-secondary hover:border-surface-500 hover:text-content-primary'
+              }`}
+            >
+              <Glyph name="lock" className="h-3.5 w-3.5" />
+              <span>Send privately</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onPrivacy?.()}
+              className="flex items-center justify-center gap-1.5 rounded-xl border border-surface-600/80 bg-surface-800/80 py-2 font-mono text-[11px] font-semibold text-content-secondary transition-colors hover:border-surface-500 hover:text-content-primary active:scale-95"
+            >
+              <Glyph name="refresh" className="h-3.5 w-3.5 text-accent-500" />
+              <span>Unshield</span>
+            </button>
+          </div>
+        )}
+
+        {/* Recipient Address Section matching Screenshot 3 */}
         <div>
           <label
             htmlFor="recipient-address"
@@ -1763,7 +1938,7 @@ function SendForm({
           </div>
         )}
 
-        {/* Amount Section matching Screenshot 4 */}
+        {/* Amount Section matching Screenshot 3 */}
         <div>
           <div className="flex items-center justify-between mb-1.5">
             <label
@@ -1772,6 +1947,13 @@ function SendForm({
             >
               AMOUNT <span className="sr-only">Amount ({assetLabel})</span>
             </label>
+            <button
+              type="button"
+              onClick={() => setShowUsd((v) => !v)}
+              className="font-mono text-[10px] font-semibold tracking-wider text-accent-500 hover:text-accent-400 uppercase transition-colors"
+            >
+              {showUsd ? `SWAP TO ${assetLabel}` : 'SWAP TO USD'}
+            </button>
           </div>
 
           <div className="flex items-center justify-between rounded-xl border border-surface-700 bg-surface-800/90 px-3 py-2.5">
@@ -1787,7 +1969,7 @@ function SendForm({
                 onClearError();
               }}
               disabled={isLoading || sendStatus === 'sending'}
-              className="w-full bg-transparent font-display text-2xl font-bold text-white placeholder:text-content-tertiary outline-none"
+              className="w-full bg-transparent font-display text-2xl font-bold text-content-primary placeholder:text-content-tertiary outline-none"
             />
             <div className="flex shrink-0 items-center gap-1 rounded-lg bg-surface-700/80 px-2.5 py-1 font-mono text-xs font-bold text-accent-500">
               <span>{assetLabel}</span>
@@ -1796,7 +1978,7 @@ function SendForm({
           </div>
         </div>
 
-        {/* Percentage Chips matching Screenshot 4.
+        {/* Percentage Chips matching Screenshot 3.
             Real pre-fills from the live spendable; MAX reserves the network
             fee for native sends. Disabled until a real spendable is known. */}
         <div className="grid grid-cols-4 gap-2">
@@ -1811,7 +1993,7 @@ function SendForm({
               type="button"
               onClick={() => handlePercentage(chip.value)}
               disabled={spendableBase === null}
-              className="rounded-lg border border-surface-700/80 bg-surface-800/80 py-1.5 font-mono text-xs font-semibold text-content-secondary transition-colors hover:border-accent-500/50 hover:text-white active:scale-95 disabled:opacity-40"
+              className="rounded-lg border border-surface-700/80 bg-surface-800/80 py-1.5 font-mono text-xs font-semibold text-content-secondary transition-colors hover:border-accent-500/50 hover:text-content-primary active:scale-95 disabled:opacity-40"
             >
               {chip.label}
             </button>
@@ -1926,14 +2108,16 @@ function SendForm({
           <p className="font-body text-xs text-danger">{error}</p>
         )}
 
-        {/* Main CTA button matching Screenshot 4 */}
+        {/* Main CTA button matching Screenshot 3 — opens the review overlay
+            first; the broadcast itself happens only from the review's
+            "Confirm send" (see below). */}
         <div className="mt-auto pt-2">
           <Button
             fullWidth
-            onClick={onConfirm}
+            onClick={() => setReviewOpen(true)}
             disabled={disableSend}
             aria-label="Send"
-            className="py-3 font-mono text-xs font-bold uppercase tracking-wider bg-accent-500 text-surface-900 shadow-md hover:bg-accent-400 active:scale-98"
+            className="py-3 font-mono text-xs font-bold uppercase tracking-wider bg-accent-500 text-white shadow-md hover:bg-accent-400 active:scale-98"
           >
             {isLoading ? 'Sending…' : 'CONTINUE'}
           </Button>
@@ -1953,6 +2137,105 @@ function SendForm({
           onClearError();
         }}
       />
+
+      {/* ── Pre-broadcast review overlay ───────────────────────────────────
+          The last human checkpoint before anything is signed: the FULL
+          recipient (never truncated — truncation is how address-poisoning
+          works), the amount, the estimated fee, and the network. Confirming
+          here is the only path to `onConfirm` (the broadcast). */}
+      {reviewOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Review transaction"
+          className="absolute inset-0 z-20 flex flex-col bg-surface-900/98 p-4 animate-fade-in"
+        >
+          <h2 className="font-display text-lg font-semibold text-content-primary mb-1">
+            Review transaction
+          </h2>
+          <p className="font-body text-xs text-content-secondary mb-3">
+            Check every field. Once sent, this cannot be undone.
+          </p>
+
+          <div className="rounded-2xl border border-surface-700/60 bg-surface-800/70 p-3">
+            <div className="flex flex-col divide-y divide-surface-700/70">
+              <div className="py-2 first:pt-0">
+                <p className="font-body text-[10px] uppercase tracking-wide text-content-tertiary">
+                  From
+                </p>
+                <p className="break-all font-mono text-xs text-content-primary">{account.address}</p>
+              </div>
+              <div className="py-2">
+                <p className="font-body text-[10px] uppercase tracking-wide text-content-tertiary">
+                  To
+                </p>
+                <p className="break-all font-mono text-xs text-content-primary">{sendTo}</p>
+              </div>
+              <div className="flex items-center justify-between gap-3 py-2">
+                <p className="font-body text-[10px] uppercase tracking-wide text-content-tertiary">
+                  Amount
+                </p>
+                <p className="font-mono text-xs text-content-primary">
+                  {sendAmount} {assetLabel}
+                </p>
+              </div>
+              <div className="flex items-center justify-between gap-3 py-2">
+                <p className="font-body text-[10px] uppercase tracking-wide text-content-tertiary">
+                  Estimated fee
+                </p>
+                <p className="font-mono text-xs text-content-primary">
+                  {sendFee !== null ? `${sendFee} ${feeSymbol}` : '—'}
+                </p>
+              </div>
+              <div className="flex items-center justify-between gap-3 py-2">
+                <p className="font-body text-[10px] uppercase tracking-wide text-content-tertiary">
+                  Network
+                </p>
+                <p className="font-mono text-xs text-content-primary">{networkName}</p>
+              </div>
+              {isStellar && !sendPrivate && sendMemo.length > 0 && (
+                <div className="flex items-center justify-between gap-3 py-2">
+                  <p className="font-body text-[10px] uppercase tracking-wide text-content-tertiary">
+                    Memo
+                  </p>
+                  <p className="font-mono text-xs text-content-primary">{sendMemo}</p>
+                </div>
+              )}
+              {sendPrivate && (
+                <div className="py-2 last:pb-0">
+                  <p className="font-body text-[11px] text-content-secondary">
+                    Private payment: funds land on a fresh one-time address only the recipient can
+                    unlock.
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="mt-auto flex flex-col gap-2 pt-4">
+            <Button
+              fullWidth
+              onClick={() => {
+                setReviewOpen(false);
+                onConfirm();
+              }}
+              disabled={isLoading}
+              aria-label="Confirm send"
+              className="py-3 font-mono text-xs font-bold uppercase tracking-wider"
+            >
+              {isLoading ? 'Sending…' : 'Confirm send'}
+            </Button>
+            <Button
+              variant="ghost"
+              fullWidth
+              onClick={() => setReviewOpen(false)}
+              disabled={isLoading}
+            >
+              Back
+            </Button>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
@@ -2113,19 +2396,19 @@ function ReceiveView({
 
   return (
     <main className="flex min-h-[600px] w-[400px] flex-col bg-surface-900 text-content-primary">
-      {/* Top Header matching Screenshot 5 */}
-      <header className="flex shrink-0 items-center justify-between border-b border-surface-800/80 px-4 py-3">
+      {/* Top Header matching Screenshot 4 */}
+      <header className="flex shrink-0 items-center justify-between border-b border-surface-600/60 px-4 py-3">
         <button
           type="button"
           onClick={onBack}
           aria-label="Back"
-          className="flex items-center gap-1.5 font-mono text-xs font-semibold text-content-secondary hover:text-white transition-colors"
+          className="flex items-center gap-1.5 font-mono text-xs font-semibold text-content-secondary hover:text-content-primary transition-colors"
         >
           <Glyph name="arrow-left" className="h-4 w-4" />
           <span>BACK</span>
         </button>
 
-        <h1 className="font-display text-sm font-bold tracking-widest text-white uppercase">
+        <h1 className="font-display text-sm font-bold tracking-widest text-content-primary uppercase">
           RECEIVE
         </h1>
 
@@ -2134,7 +2417,7 @@ function ReceiveView({
 
       {/* Main Content */}
       <div className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-3">
-        {/* Network Banner matching Screenshot 5 */}
+        {/* Network Banner matching Screenshot 4 */}
         <div className="flex items-center justify-center gap-2 py-1">
           <BrandLogo size="md" className="h-6 w-6" />
           <span className="font-display text-sm font-bold tracking-wider text-accent-500 uppercase">
@@ -2142,22 +2425,22 @@ function ReceiveView({
           </span>
         </div>
 
-        {/* Big QR Code Card matching Screenshot 5 */}
+        {/* Big QR Code Card matching Screenshot 4 */}
         <div className="flex items-center justify-center rounded-2xl border border-surface-700/80 bg-surface-800/80 p-5 shadow-raised">
           <div className="rounded-xl bg-white p-3 shadow-md">
             <QRCode value={account.address} size={200} />
           </div>
         </div>
 
-        {/* Warning Box matching Screenshot 5 */}
+        {/* Warning Box matching Screenshot 4 */}
         <div className="flex items-start gap-2.5 rounded-xl border border-accent-500/40 bg-accent-500/5 p-3">
           <Glyph name="alert" className="h-4 w-4 text-accent-500 shrink-0 mt-0.5" />
           <p className="font-mono text-[11px] leading-relaxed text-content-secondary">
-            Ensure you only send <span className="text-white font-semibold">{nativeSymbol}</span> to this address via the <span className="text-accent-400 font-semibold">{networkName}</span> network.
+            Ensure you only send <span className="text-content-primary font-semibold">{nativeSymbol}</span> to this address via the <span className="text-accent-400 font-semibold">{networkName}</span> network.
           </p>
         </div>
 
-        {/* YOUR ADDRESS Card matching Screenshot 5 */}
+        {/* YOUR ADDRESS Card matching Screenshot 4 */}
         <div>
           <span className="block font-mono text-[10px] font-semibold tracking-wider text-content-tertiary uppercase mb-1.5">
             YOUR ADDRESS
@@ -2187,7 +2470,7 @@ function ReceiveView({
           </div>
         </div>
 
-        {/* REQUEST SPECIFIC AMOUNT matching Screenshot 5 */}
+        {/* REQUEST SPECIFIC AMOUNT matching Screenshot 4 */}
         <div>
           <label
             htmlFor="receive-amount"
@@ -2211,11 +2494,11 @@ function ReceiveView({
           </div>
         </div>
 
-        {/* SHARE RECEIVE LINK button matching Screenshot 5 */}
+        {/* SHARE RECEIVE LINK button matching Screenshot 4 */}
         <button
           type="button"
           onClick={handleShareLink}
-          className="w-full rounded-xl border border-surface-600 bg-surface-800 py-3 font-mono text-xs font-bold tracking-wider text-white transition-colors hover:bg-surface-700 active:scale-98 uppercase"
+          className="w-full rounded-xl border border-surface-600 bg-surface-800 py-3 font-mono text-xs font-bold tracking-wider text-content-primary transition-colors hover:bg-surface-700 active:scale-98 uppercase"
         >
           {linkCopied ? 'LINK COPIED TO CLIPBOARD' : 'SHARE RECEIVE LINK'}
         </button>

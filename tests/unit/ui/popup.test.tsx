@@ -364,6 +364,8 @@ describe('popup unlocked dashboard', () => {
 
     // With sufficient balance the estimate resolves and Send is enabled.
     await user.click(screen.getByRole('button', { name: 'Send' }));
+    // The review overlay is the last checkpoint before broadcast.
+    await user.click(await screen.findByRole('button', { name: 'Confirm send' }));
     expect(await screen.findByText(/Sent!/)).toBeInTheDocument();
   });
 
@@ -472,6 +474,12 @@ describe('popup unlocked dashboard', () => {
     await screen.findByText(/Estimated fee: 100 stroops/);
     await user.click(screen.getByRole('button', { name: 'Send' }));
 
+    // The pre-broadcast review shows the FULL recipient and requires a
+    // distinct confirm click — the memo and amount travel with the send.
+    const confirm = await screen.findByRole('button', { name: 'Confirm send' });
+    expect(screen.getAllByText(stellar.address).length).toBeGreaterThan(0);
+    await user.click(confirm);
+
     expect(await screen.findByText(/Sent!/)).toBeInTheDocument();
 
     // The memo the user typed must actually be on the wire — not collected
@@ -548,6 +556,12 @@ describe('popup unlocked dashboard', () => {
 
     await screen.findByText(/Estimated fee: 100 stroops/);
     await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    // The review overlay must show the private-payment note and gate the
+    // broadcast behind a distinct confirm click.
+    const confirmPrivate = await screen.findByRole('button', { name: 'Confirm send' });
+    expect(screen.getAllByText(/one-time address/).length).toBeGreaterThan(0);
+    await user.click(confirmPrivate);
 
     expect(await screen.findByText(/Sent!/)).toBeInTheDocument();
 
@@ -730,5 +744,57 @@ describe('popup unlocked dashboard', () => {
       await screen.findByRole('button', { name: /Select network, current STELLAR MAINNET/ }),
     ).toBeInTheDocument();
     expect(await screen.findByText(/REAL funds move on this network/)).toBeInTheDocument();
+  });
+
+  it('the banner names the NETWORK BEING VIEWED when switching between mainnets', async () => {
+    const user = userEvent.setup();
+    // Stellar is already on mainnet; the dashboard starts on the EVM account.
+    useWallet.setState({
+      vaultState: 'unlocked',
+      accounts: ACCOUNTS,
+      networks: NETWORK_SUMMARIES,
+      selectedNetworks: {
+        stellar: 'stellar:mainnet',
+        evm: 'evm:sepolia',
+        solana: 'solana:devnet',
+      },
+    });
+    installResponder({
+      'vault.status': { state: 'unlocked', unlockedUntil: Date.now() + 60_000 },
+      'zk.capability': null,
+      'networks.list': NETWORK_SUMMARIES,
+      'networks.selected': {
+        stellar: 'stellar:mainnet',
+        evm: 'evm:sepolia',
+        solana: 'solana:devnet',
+      },
+      'networks.select': { ok: true },
+      'account.balance': { chain: 'stellar', address: 'STELLAR-ADDR', balance: '10000000' },
+    });
+
+    render(<App />);
+    expect(await screen.findByText('Portfolio')).toBeInTheDocument();
+
+    // The dashboard is on the EVM account: with Stellar on mainnet but not
+    // being viewed, the banner must NOT claim "You are on Stellar Mainnet".
+    await screen.findByText(/Testnet only/);
+    expect(screen.queryByText(/Stellar Mainnet\. REAL funds/)).not.toBeInTheDocument();
+
+    // Switch EVM from Sepolia to Ethereum mainnet: the banner follows the
+    // VIEWED chain's network, not the chain-priority scan order.
+    await user.click(screen.getByRole('button', { name: /Select network, current SEPOLIA/ }));
+    await user.click(screen.getByRole('menuitemradio', { name: /Ethereum/ }));
+    expect(
+      await screen.findByText(/You are on Ethereum\. REAL funds move on this network/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Stellar Mainnet\. REAL funds/)).not.toBeInTheDocument();
+
+    // Moving the dashboard to the Stellar account names Stellar again — the
+    // banner tracks whatever network the user is actually about to move funds on.
+    await user.click(screen.getByRole('button', { name: /Select network, current ETHEREUM/ }));
+    await user.click(screen.getByRole('menuitemradio', { name: /Stellar Mainnet/ }));
+    expect(
+      await screen.findByText(/You are on Stellar Mainnet\. REAL funds move on this network/),
+    ).toBeInTheDocument();
   });
 });

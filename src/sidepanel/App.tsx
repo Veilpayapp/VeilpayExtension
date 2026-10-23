@@ -15,9 +15,11 @@ import { GrantApproval } from '@/ui/components/GrantApproval';
 import { WalletConnectView } from '@/ui/components/WalletConnectView';
 import { BrandLogo } from '@/ui/components/BrandLogo';
 import { Glyph, type GlyphName } from '@/ui/components/Glyph';
+import { useTheme } from '@/ui/theme/useTheme';
 
 /** Full-height wallet companion surface for approvals and quick account access. */
 export default function SidePanelApp() {
+  const { isDark, toggleTheme } = useTheme();
   const {
     vaultState, isLoading, error, accounts, pendingConnection, pendingApproval,
     pendingX402Payment, pendingGrantRequest, refresh, loadAccounts,
@@ -48,9 +50,11 @@ export default function SidePanelApp() {
       return;
     }
     const ok = await unlock(unlockPassphrase);
+    // Clear the passphrase from state either way — the side panel is
+    // long-lived, and the secret's job ends when the vault answers.
+    setUnlockPassphrase('');
     if (!ok) {
       setUnlockError(t('wallet.wrongPassphrase'));
-      setUnlockPassphrase('');
     }
   };
 
@@ -165,9 +169,20 @@ export default function SidePanelApp() {
         <BrandLogo size="md" />
         <h1 className="font-display text-lg font-bold text-content-primary">{t('brand')}</h1>
       </div>
-      <span className="rounded-full border border-surface-600 px-2 py-0.5 font-mono text-[10px] text-content-tertiary">
-        {t('version')}
-      </span>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={toggleTheme}
+          aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+          title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+          className="rounded-lg border border-surface-600/80 bg-surface-800 p-1.5 text-content-secondary transition-colors hover:border-accent-500/50 hover:text-accent-500 active:scale-95"
+        >
+          <Glyph name={isDark ? 'sun' : 'moon'} className="h-3.5 w-3.5" />
+        </button>
+        <span className="rounded-full border border-surface-600 px-2 py-0.5 font-mono text-[10px] text-content-tertiary">
+          {t('version')}
+        </span>
+      </div>
     </header>
   );
 

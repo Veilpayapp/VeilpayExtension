@@ -1,5 +1,4 @@
 import {
-  EXTENSION_SOURCES,
   isPrivilegedKind,
   Request,
   type Response,
@@ -111,7 +110,22 @@ function stampedSenderOrigin(sender: chrome.runtime.MessageSender): string | nul
 }
 
 /**
- * Whether a message genuinely came from an extension-owned surface.
+ * The extension-page paths that may drive privileged kinds.
+ *
+ * The decision rests on the Chrome-stamped URL path because the declared
+ * `source` field is sender-controlled: the offscreen document — which runs
+ * the vendored SPP SDK — shares our origin and our bus, and previously could
+ * reach ANY privileged kind (export keys, vault reset, transfers) simply by
+ * claiming `source: 'popup'`. Only these three wallet UI surfaces pass.
+ */
+const UI_SURFACE_PATHS: ReadonlySet<string> = new Set([
+  '/popup.html',
+  '/options.html',
+  '/sidepanel.html',
+]);
+
+/**
+ * Whether a message genuinely came from one of the wallet's UI surfaces.
  *
  * Two browser-stamped facts, neither forgeable from a page:
  *
@@ -122,18 +136,22 @@ function stampedSenderOrigin(sender: chrome.runtime.MessageSender): string | nul
  *     pages report the *page's* origin, never ours. (This subsumes the old
  *     `sender.tab` veto: a tabbed sender whose stamped origin is ours is still
  *     our own page, and one whose origin is not ours is rejected here anyway.)
- *  2. The declared `source` is a UI surface. This one *is* forgeable, so it is
- *     never load-bearing on its own — it exists to reject `offscreen` and
- *     `inpage`, which share our origin or our bus but must not pair the bridge.
+ *  2. The Chrome-stamped `sender.url` path is one of the UI surfaces. This
+ *     excludes the offscreen document and any future extension page, which
+ *     share our origin but hold no wallet UI authority.
  */
 function isTrustedExtensionSurface(
-  request: Request,
   sender: chrome.runtime.MessageSender
 ): boolean {
   const expected = extensionOrigin();
   if (expected === null) return false;
   if (stampedSenderOrigin(sender) !== expected) return false;
-  return EXTENSION_SOURCES.includes(request.source);
+  if (typeof sender.url !== 'string') return false;
+  try {
+    return UI_SURFACE_PATHS.has(new URL(sender.url).pathname);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -163,7 +181,7 @@ export async function dispatch(
   // Enforced before the handler map is touched: a kind that carries a secret or
   // destroys the vault must originate from our own UI, not from a page that
   // merely claims to be it.
-  if (isPrivilegedKind(request.kind) && !isTrustedExtensionSurface(request, sender)) {
+  if (isPrivilegedKind(request.kind) && !isTrustedExtensionSurface(sender)) {
     return err(
       request.id,
       'ORIGIN_DENIED',

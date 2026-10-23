@@ -51,10 +51,14 @@ export function hashToScalar(data: Uint8Array): bigint {
 }
 
 function randomScalar(): Uint8Array {
-  const bytes = crypto.getRandomValues(new Uint8Array(32));
-  let value = bytesToBigInt(bytes) % secp256k1.CURVE.n;
-  if (value === 0n) value = 1n;
-  return bigIntToBytes(value);
+  // Rejection sampling rather than mod-reduction: uniform in [1, n), no
+  // modulo bias. Only ever used for ephemeral, never-persisted scalars, so
+  // the tighter distribution changes no existing address.
+  for (;;) {
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    const value = bytesToBigInt(bytes);
+    if (value >= 1n && value < secp256k1.CURVE.n) return bigIntToBytes(value);
+  }
 }
 
 function bytesToBigInt(bytes: Uint8Array): bigint {

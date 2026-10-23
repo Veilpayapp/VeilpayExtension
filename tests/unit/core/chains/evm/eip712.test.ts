@@ -93,4 +93,91 @@ describe('EIP-712 typed data', () => {
   it('rejects an unknown primary type', () => {
     expect(() => hashTypedData({ ...MAIL, primaryType: 'Nope' })).toThrow(/unknown type/);
   });
+
+  it('encodes a bytes32 domain salt RAW (left-aligned), not keccak-hashed', () => {
+    // Independent spec reconstruction: for a domain of { name, salt }, the
+    // separator is keccak256(typeHash || keccak256(name) || saltRaw32). The
+    // buggy behavior hashed the salt; this manual build does not.
+    const salt = `0x${'aa'.repeat(32)}`;
+    const data = {
+      types: {
+        Mail: [{ name: 'contents', type: 'string' }],
+      },
+      primaryType: 'Mail',
+      domain: { name: 'X', salt },
+      message: { contents: 'hi' },
+    };
+
+    const typeHash = keccak_256(new TextEncoder().encode('EIP712Domain(string name,bytes32 salt)'));
+    const nameHash = keccak_256(new TextEncoder().encode('X'));
+    const saltRaw = hexToBytes(salt.slice(2));
+    const manualSeparator = keccak_256(
+      new Uint8Array([...typeHash, ...nameHash, ...saltRaw]),
+    );
+
+    // Library path: hashStruct('EIP712Domain', …) is internal, so compare full
+    // digests — rebuild the full digest with the manual separator and the
+    // library's message struct hash via a second call... Instead, assert the
+    // separator indirectly: a salt change must change the digest, and the
+    // digest must equal the manual two-stage reconstruction.
+    const messageTypeHash = keccak_256(new TextEncoder().encode('Mail(string contents)'));
+    const contentsHash = keccak_256(new TextEncoder().encode('hi'));
+    const manualMessageHash = keccak_256(
+      new Uint8Array([...messageTypeHash, ...contentsHash]),
+    );
+    const manualDigest = keccak_256(
+      new Uint8Array([0x19, 0x01, ...manualSeparator, ...manualMessageHash]),
+    );
+
+    expect(bytesToHex(hashTypedData(data))).toBe(bytesToHex(manualDigest));
+  });
+
+  it('changes the digest when the salt changes', () => {
+    const base = {
+      types: { Mail: [{ name: 'contents', type: 'string' }] },
+      primaryType: 'Mail',
+      domain: { salt: `0x${'aa'.repeat(32)}` },
+      message: { contents: 'hi' },
+    };
+    const other = {
+      ...base,
+      domain: { salt: `0x${'bb'.repeat(32)}` },
+    };
+    expect(bytesToHex(hashTypedData(base))).not.toBe(bytesToHex(hashTypedData(other)));
+  });
+
+  it('rejects a bytes32 field whose value is not exactly 32 bytes', () => {
+    const data = {
+      types: { Mail: [{ name: 'contents', type: 'string' }] },
+      primaryType: 'Mail',
+      domain: { salt: '0x1234' },
+      message: { contents: 'hi' },
+    };
+    expect(() => hashTypedData(data)).toThrow(/exactly 32 bytes/);
+  });
+
+  it('rejects a message missing a declared field instead of encoding a zero', () => {
+    const data = {
+      types: {
+        Mail: [
+          { name: 'contents', type: 'string' },
+          { name: 'flag', type: 'bool' },
+        ],
+      },
+      primaryType: 'Mail',
+      domain: { name: 'X' },
+      message: { contents: 'hi' }, // flag omitted
+    };
+    expect(() => hashTypedData(data)).toThrow(/missing field "flag"/);
+  });
+
+  it('rejects out-of-range integer widths (uint8: 300)', () => {
+    const data = {
+      types: { Mail: [{ name: 'count', type: 'uint8' }] },
+      primaryType: 'Mail',
+      domain: { name: 'X' },
+      message: { count: 300 },
+    };
+    expect(() => hashTypedData(data)).toThrow(/out of range/);
+  });
 });

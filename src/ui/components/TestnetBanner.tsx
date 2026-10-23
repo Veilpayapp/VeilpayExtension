@@ -4,8 +4,16 @@ import type { NetworkSummary } from '@/core/messaging/protocol';
 /**
  * Network-aware banner for every surface that touches funds.
  *
- * Scans the SELECTED network of every chain (the popup is multi-chain), in
- * priority order:
+ * The banner answers "what am I about to move funds on RIGHT NOW?", so it
+ * keys on the chain the user is actually viewing (the dashboard's active
+ * account), not a fixed-priority scan of every chain's selection — the old
+ * scan always named the first mainnet in chain order, so a user who switched
+ * the dashboard from Stellar Mainnet to Ethereum still read "You are on
+ * Stellar Mainnet". On chain-agnostic surfaces (no accounts yet, e.g. the
+ * welcome screen) it falls back to the wallet-wide scan: any selected mainnet
+ * is the thing to warn about.
+ *
+ * Priority within the resolved set:
  * - mainnet → the inverse warning: REAL funds move on this network now;
  * - custom RPC → caution: the endpoint is user-supplied and unvetted;
  * - otherwise → the historical testnet warning.
@@ -14,7 +22,7 @@ import type { NetworkSummary } from '@/core/messaging/protocol';
  * the testnet warning.
  */
 export function TestnetBanner({ scope = 'testnet' }: { scope?: 'testnet' | 'privacy' }) {
-  const { networks, selectedNetworks } = useWallet();
+  const { accounts, selectedAccountIdx, networks, selectedNetworks } = useWallet();
 
   if (scope === 'privacy') {
     return (
@@ -25,12 +33,27 @@ export function TestnetBanner({ scope = 'testnet' }: { scope?: 'testnet' | 'priv
     );
   }
 
-  const selected: NetworkSummary[] = [];
-  for (const chain of ['stellar', 'evm', 'solana'] as const) {
+  // The viewed chain, when a dashboard account exists to view.
+  const activeChain =
+    accounts.length > 0
+      ? accounts[Math.min(selectedAccountIdx, accounts.length - 1)]?.chain
+      : undefined;
+
+  const resolve = (chain: 'stellar' | 'evm' | 'solana'): NetworkSummary | undefined => {
     const id = selectedNetworks[chain];
-    const match = networks.find((n) => n.chain === chain && n.id === id);
-    if (match !== undefined) selected.push(match);
-  }
+    return networks.find((n) => n.chain === chain && n.id === id);
+  };
+
+  // Viewed-chain first; the wallet-wide scan only when nothing is being viewed.
+  const selected: NetworkSummary[] =
+    activeChain !== undefined
+      ? (() => {
+          const viewed = resolve(activeChain);
+          return viewed !== undefined ? [viewed] : [];
+        })()
+      : (['stellar', 'evm', 'solana'] as const)
+          .map(resolve)
+          .filter((n): n is NetworkSummary => n !== undefined);
 
   const mainnet = selected.find((n) => n.kind === 'mainnet');
   if (mainnet !== undefined) {

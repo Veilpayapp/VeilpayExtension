@@ -36,6 +36,10 @@ export interface SecuritySettings {
   webauthnPublicKey: string | null;
   /** Whether WebAuthn unlock is enabled on this device. */
   webauthnEnabled: boolean;
+  /** Consecutive failed PIN attempts (drives the brute-force lockout). */
+  pinFailedAttempts: number;
+  /** Epoch ms until which PIN verification is locked out, or null. */
+  pinLockedUntil: number | null;
 }
 
 /** Public-facing security status (no secret material). */
@@ -178,6 +182,8 @@ const DEFAULT_SETTINGS: SecuritySettings = {
   webauthnCredentialId: null,
   webauthnPublicKey: null,
   webauthnEnabled: false,
+  pinFailedAttempts: 0,
+  pinLockedUntil: null,
 };
 
 function isSettings(value: unknown): value is SecuritySettings {
@@ -190,7 +196,16 @@ function isSettings(value: unknown): value is SecuritySettings {
     const v = candidate[key];
     if (v !== null && typeof v !== 'string') return false;
   }
-  return typeof candidate.webauthnEnabled === 'boolean';
+  if (typeof candidate.webauthnEnabled !== 'boolean') return false;
+  // The throttle fields were added later — older records lack them, so they
+  // may be absent (defaults fill in) but must be well-typed when present.
+  const attempts = candidate.pinFailedAttempts;
+  if (attempts !== undefined && (typeof attempts !== 'number' || attempts < 0)) return false;
+  const lockedUntil = candidate.pinLockedUntil;
+  if (lockedUntil !== undefined && lockedUntil !== null && typeof lockedUntil !== 'number') {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -199,7 +214,9 @@ function isSettings(value: unknown): value is SecuritySettings {
  */
 export async function readSettings(): Promise<SecuritySettings> {
   const stored = await readMeta<unknown>(STORAGE_KEY);
-  return isSettings(stored) ? stored : { ...DEFAULT_SETTINGS };
+  // Defaults first: records written before the throttle fields existed lack
+  // them, and the merge fills them without a migration.
+  return isSettings(stored) ? { ...DEFAULT_SETTINGS, ...stored } : { ...DEFAULT_SETTINGS };
 }
 
 /**
@@ -255,16 +272,62 @@ export async function setupPin(pin: string): Promise<{ ok: boolean }> {
   return { ok: true };
 }
 
+// ---------------------------------------------------------------------------
+// PIN brute-force throttle
+// ---------------------------------------------------------------------------
+//
+// scrypt (N=2^17) already makes each guess cost ~0.5–1 s, but a 4-digit PIN is
+// still only 10k candidates — hours of scripted attempts with no other control.
+// After PIN_FAST_ATTEMPTS free failures, every further failure doubles a
+// lockout window (30 s, 60 s, 120 s, … capped at 5 min). The counter is
+// persisted, so reloading the extension or restarting the service worker does
+// not reset it. A successful verification clears the counter.
+// ---------------------------------------------------------------------------
+
+const PIN_FAST_ATTEMPTS = 5;
+const PIN_BASE_LOCKOUT_MS = 30_000;
+const PIN_MAX_LOCKOUT_MS = 5 * 60_000;
+
 /**
- * Verifies a PIN against the stored hash.
+ * Verifies a PIN against the stored hash, throttled against brute force.
+ * When locked out, returns `ok: false` with `retryAfterMs` set — the PIN is
+ * NOT evaluated in that state (a correct PIN waits like any other attempt).
  */
-export async function verifyUserPin(pin: string): Promise<{ ok: boolean }> {
+export async function verifyUserPin(
+  pin: string,
+): Promise<{ ok: boolean; retryAfterMs?: number }> {
   const settings = await readSettings();
   if (settings.pinHash === null || settings.pinSalt === null) {
     return { ok: false };
   }
+
+  const now = Date.now();
+  if (settings.pinLockedUntil !== null && now < settings.pinLockedUntil) {
+    return { ok: false, retryAfterMs: settings.pinLockedUntil - now };
+  }
+
   const valid = await verifyPin(pin, settings.pinHash, settings.pinSalt);
-  return { ok: valid };
+  if (valid) {
+    if (settings.pinFailedAttempts > 0 || settings.pinLockedUntil !== null) {
+      await writeSettings({ ...settings, pinFailedAttempts: 0, pinLockedUntil: null });
+    }
+    return { ok: true };
+  }
+
+  const failures = settings.pinFailedAttempts + 1;
+  let lockedUntil: number | null = null;
+  if (failures > PIN_FAST_ATTEMPTS) {
+    const backoff = Math.min(
+      PIN_BASE_LOCKOUT_MS * 2 ** (failures - PIN_FAST_ATTEMPTS - 1),
+      PIN_MAX_LOCKOUT_MS,
+    );
+    lockedUntil = now + backoff;
+  }
+  await writeSettings({ ...settings, pinFailedAttempts: failures, pinLockedUntil: lockedUntil });
+  return {
+    ok: false,
+    ...(lockedUntil !== null ? { retryAfterMs: lockedUntil - now } : {}),
+  };
 }
 
 /**
